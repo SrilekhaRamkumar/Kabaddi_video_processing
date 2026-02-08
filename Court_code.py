@@ -1,12 +1,14 @@
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
 # ======================================================
 # CONFIG
 # ======================================================
 VIDEO_PATH = "Videos/raid1.mp4"
 DISPLAY_SCALE = 0.5
-FPS_DELAY = 30
+FPS_DELAY = 1
+CONF_THRESH = 0.4
 
 # ======================================================
 # IMAGE-SPACE COURT LINES
@@ -20,10 +22,6 @@ lines = {
     "end_right": [(1833, 1076), (1916, 1041)],
     "lobby_left": [(45, 525), (921, 493)],
     "lobby_right": [(690, 1076), (1915, 821)],
-}
-
-colors = {
-    k: (100, 100, 255) for k in lines
 }
 
 # ======================================================
@@ -45,28 +43,28 @@ def intersect(l1, l2):
     return [x, y]
 
 # ======================================================
-# HOMOGRAPHY SETUP
+# HOMOGRAPHY (IMAGE → COURT)
 # ======================================================
 L = {k: line_eq(*v) for k, v in lines.items()}
 
 img_pts = np.array([
-    intersect(L["end_back"],  L["end_left"]),    # (0,0)
-    intersect(L["end_back"],  L["end_right"]),   # (10,0)
-    intersect(L["middle"],    L["end_left"]),    # (0,6.5)
-    intersect(L["middle"],    L["end_right"]),   # (10,6.5)
+    intersect(L["end_back"], L["end_left"]),
+    intersect(L["end_back"], L["end_right"]),
+    intersect(L["middle"], L["end_left"]),
+    intersect(L["middle"], L["end_right"]),
 ], dtype=np.float32)
 
 court_pts = np.array([
-    [0, 6.5],    # end_back ∩ end_left
-    [10, 6.5],   # end_back ∩ end_right
-    [0, 0],      # middle ∩ end_left
-    [10, 0]      # middle ∩ end_right
+    [0, 6.5],
+    [10, 6.5],
+    [0, 0],
+    [10, 0],
 ], dtype=np.float32)
 
 H, _ = cv2.findHomography(img_pts, court_pts)
 
 # ======================================================
-# HALF COURT MAT (GROUND TRUTH)
+# HALF COURT MAT
 # ======================================================
 COURT_W, COURT_H = 400, 260
 mat_base = np.ones((COURT_H, COURT_W, 3), dtype=np.uint8) * 235
@@ -76,42 +74,25 @@ def court_to_pixel(x, y):
     py = int((6.5 - y) / 6.5 * COURT_H)
     return px, py
 
-# Outer boundary
-cv2.rectangle(
-    mat_base,
-    court_to_pixel(0, 0),
-    court_to_pixel(10, 6.5),
-    (0, 0, 0),
-    2
-)
+# Draw mat lines ONCE
+cv2.rectangle(mat_base, court_to_pixel(0, 0),
+              court_to_pixel(10, 6.5), (0, 0, 0), 2)
 
-# ===== Single correct lines =====
-court_lines = [
-    (3.75, "baulk"),
-    (4.75, "bonus"),
-]
+for y, name in [(3.75, "baulk"), (4.75, "bonus")]:
+    cv2.line(mat_base, court_to_pixel(0, y),
+             court_to_pixel(10, y), (0, 0, 0), 1)
+    cv2.putText(mat_base, name, (8, court_to_pixel(0, y)[1]-4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)
 
-for y, name in court_lines:
-    p1 = court_to_pixel(0, y)
-    p2 = court_to_pixel(10, y)
-    cv2.line(mat_base, p1, p2, (0, 0, 0), 1)
-    cv2.putText(
-        mat_base, name,
-        (10, max(p1[1]-5, 12)),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1
-    )
-
-# Lobby lines
 for x in [0.75, 9.25]:
-    p1 = court_to_pixel(x, 0)
-    p2 = court_to_pixel(x, 6.5)
-    cv2.line(mat_base, p1, p2, (0, 0, 0), 1)
-    lx = min(max(p1[0]+3, 5), COURT_W-60)
-    cv2.putText(
-        mat_base, "lobby",
-        (lx, 20),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (60, 60, 60), 1
-    )
+    cv2.line(mat_base, court_to_pixel(x, 0),
+             court_to_pixel(x, 6.5), (0, 0, 0), 1)
+
+# ======================================================
+# YOLO PERSON DETECTOR (CPU FOR STABILITY)
+# ======================================================
+model = YOLO("yolov8n.pt")
+model.to("cpu")
 
 # ======================================================
 # MOUSE
@@ -122,9 +103,19 @@ def mouse_cb(event, x, y, flags, param):
     if event == cv2.EVENT_MOUSEMOVE:
         mouse_pt = (int(x / DISPLAY_SCALE), int(y / DISPLAY_SCALE))
 
-cv2.namedWindow("Video (Calibrated)")
-cv2.namedWindow("Half Court (Corrected)")
-cv2.setMouseCallback("Video (Calibrated)", mouse_cb)
+cv2.namedWindow("Video (Integrated)")
+cv2.namedWindow("Half Court (2D)")
+cv2.setMouseCallback("Video (Integrated)", mouse_cb)
+
+# ======================================================
+# 3D BBOX DRAW
+# ======================================================
+def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv2.rectangle(img, (x1+depth, y1-depth),
+                  (x2+depth, y2-depth), (0, 255, 0), 2)
+    for p in [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]:
+        cv2.line(img, p, (p[0]+depth, p[1]-depth), (0, 255, 0), 2)
 
 # ======================================================
 # VIDEO LOOP
@@ -139,30 +130,51 @@ while True:
     vis = frame.copy()
     mat = mat_base.copy()
 
-    # --- draw lines + labels on video ---
-    for name, (p1, p2) in lines.items():
-        cv2.line(vis, p1, p2, colors[name], 2)
-        mx, my = (p1[0]+p2[0])//2, (p1[1]+p2[1])//2
-        cv2.putText(
-            vis, name,
-            (mx+4, my-4),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (40, 40, 40), 1
-        )
+    # Draw court lines on VIDEO
+    for (p1, p2) in lines.values():
+        cv2.line(vis, p1, p2, (255, 0, 0), 2)
 
-    # --- cursor mapping ---
-    if mouse_pt is not None:
-        pt = np.array([[mouse_pt]], dtype=np.float32)
-        mapped = cv2.perspectiveTransform(pt, H)[0][0]
+    # Player detection
+    results = model(frame, device="cpu", verbose=False)[0]
+
+    for box in results.boxes:
+        if int(box.cls[0]) != 0 or float(box.conf[0]) < CONF_THRESH:
+            continue
+
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+
+        # Foot point
+        fx = (x1 + x2) // 2
+        fy = y2
+
+        # Project to court
+        mapped = cv2.perspectiveTransform(
+            np.array([[[fx, fy]]], dtype=np.float32), H
+        )[0][0]
+
         cx, cy = mapped
 
         if 0 <= cx <= 10 and 0 <= cy <= 6.5:
-            cv2.circle(vis, mouse_pt, 6, (0, 0, 255), -1)
+            draw_3d_bbox(vis, x1, y1, x2, y2)
             mx, my = court_to_pixel(cx, cy)
-            cv2.circle(mat, (mx, my), 6, (0, 0, 255), -1)
+            cv2.circle(mat, (mx, my), 5, (255, 0, 0), -1)
+
+    # Cursor mapping
+    if mouse_pt is not None:
+        mapped = cv2.perspectiveTransform(
+            np.array([[mouse_pt]], dtype=np.float32), H
+        )[0][0]
+
+        cx, cy = mapped
+        if 0 <= cx <= 10 and 0 <= cy <= 6.5:
+            cv2.circle(vis, mouse_pt, 5, (255, 0, 0), -1)
+            mx, my = court_to_pixel(cx, cy)
+            cv2.circle(mat, (mx, my), 5, (0, 0, 255), -1)
 
     vis_small = cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE)
-    cv2.imshow("Video (Calibrated)", vis_small)
-    cv2.imshow("Half Court (Corrected)", mat)
+
+    cv2.imshow("Video (Integrated)", vis_small)
+    cv2.imshow("Half Court (2D)", mat)
 
     if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'):
         break

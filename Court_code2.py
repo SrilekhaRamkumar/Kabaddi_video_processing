@@ -5,10 +5,15 @@ from scipy.optimize import linear_sum_assignment
 from threading import Thread
 from queue import Queue
 import time
-
+import torch
+import os
+import hashlib
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
+
+VIDEO_PATH = "D:/Codes/kabaddi/Phase-2/Videos/raid3.mp4"
+
 class VideoStream:
     def __init__(self, path, queue_size=5):
         self.stream = cv2.VideoCapture(path)
@@ -41,7 +46,7 @@ class VideoStream:
 # ======================================================
 # CONFIG (RESTORED)
 # ======================================================
-VIDEO_PATH = "D:/Codes/kabaddi/Phase-2/Videos/raid1.mp4"
+
 DISPLAY_SCALE = 0.5
 FPS_DELAY = 1
 CONF_THRESH = 0.4
@@ -84,7 +89,7 @@ img_pts = np.array([intersect(L[a], L[b]) for a, b in [
 ]], dtype=np.float32)
 
 court_pts = np.array([[0, 6.5], [10, 6.5], [0, 0], [10, 0]], dtype=np.float32)
-H, _ = cv2.findHomography(img_pts, court_pts)
+H, _ = cv2.findHomography(img_pts, court_pts, cv2.RANSAC, 5.0)
 
 COURT_W, COURT_H = 400, 260
 mat_base = np.ones((COURT_H, COURT_W, 3), dtype=np.uint8) * 235
@@ -136,7 +141,11 @@ def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
 # ======================================================
 # MAIN LOOP
 # ======================================================
-model = YOLO("yolov8n.pt").to("cuda")
+# To this:
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = YOLO("yolov8n.pt").to(device)
+
 vs = VideoStream(VIDEO_PATH).start()
 prev_gray = None
 NEXT_ID = 0
@@ -145,6 +154,24 @@ frame_idx = 0
 
 cv2.namedWindow("Video (Integrated)")
 cv2.namedWindow("Half Court (2D)")
+
+path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
+output_filename = f"D:/Codes/kabaddi/Phase-2/Videos/processed_{path_hash}.mp4"
+
+
+vis_w = int(1920 * DISPLAY_SCALE)
+vis_h = int(1080 * DISPLAY_SCALE)
+canvas_w = vis_w + COURT_W 
+canvas_h = max(vis_h, COURT_H)
+
+if os.path.exists(output_filename):
+    print(f"Playback only: {output_filename} already exists.")
+    out = None 
+else:
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
+    print(f"Recording to: {output_filename}")
+
 
 while vs.running():
     frame = vs.read()
@@ -174,7 +201,7 @@ while vs.running():
                         data["flow_pts"] = good_new.reshape(-1, 1, 2)
 
     # 2. YOLO DETECTION
-    results = model(frame, device="cuda", verbose=False)[0]
+    results = model(frame, device=device, verbose=False)[0]
     detections = []
     for box in results.boxes:
         if int(box.cls[0]) != 0 or float(box.conf[0]) < CONF_THRESH: continue
@@ -266,9 +293,38 @@ while vs.running():
             cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
     prev_gray = gray.copy()
+
+
+    # Print Debug Info every 30 frames
+    if frame_idx % 30 == 0:
+        print(f"\n--- Frame: {frame_idx} | Active Players: {len(GALLERY)} ---")
+        for pid, data in GALLERY.items():
+            # 1. Access Kalman State (x, y, vx, vy)
+            state = data["kf"].statePost.flatten()
+            
+            # 2. Access SGM (Spatial-Global Matching / Appearance Feature) 
+            # Printing only the first 5 elements of the 512-dim histogram for brevity
+            feature_sample = data["feat"][:5] 
+            
+            print(f"ID {pid:2} | Pos: ({state[0]:4.1f}, {state[1]:4.1f}) | "
+                f"V: ({state[2]:4.1f}, {state[3]:4.1f}) | "
+                f"Age: {data['age']:3} | SGM Sample: {feature_sample}")
+            
+  
+    vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
+    combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    combined_frame[:vis_h, :vis_w] = vis_render
+    combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
+    
+    # Write to file
+    if out is not None:
+        out.write(combined_frame)
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
     cv2.imshow("Half Court (2D)", mat)
     
     if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'): break
 
+
+if 'out' in locals():
+    out.release()
 cv2.destroyAllWindows()

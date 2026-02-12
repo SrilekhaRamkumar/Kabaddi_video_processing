@@ -14,7 +14,7 @@ import hashlib
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
 
-VIDEO_PATH = "Videos/raid3.mp4"
+VIDEO_PATH = "Videos/raid1.mp4"
 
 class VideoStream:
     def __init__(self, path, queue_size=5):
@@ -319,22 +319,34 @@ while vs.running():
 
     prev_gray = gray.copy()
 
-
-    # Debug Info every 30 frames
+    # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
+    # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
     if frame_idx % 30 == 0:
-        print(f"\n--- Frame: {frame_idx} | Active Players: {len(GALLERY)} ---")
+        print(f"\n" + "█"*70)
+        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL MEMORY ENTRIES: {len(GALLERY)}")
+        print("█"*70)
+        
         for pid, data in GALLERY.items():
-            # 1. Access Kalman State (x, y, vx, vy)
-            state = data["kf"].statePost.flatten()
+            # 1. Physics & State
+            state = data["kf"].statePost.flatten() # [x, y, vx, vy]
             
-            # 2. Access SGM (Spatial-Global Matching / Appearance Feature) 
-            # First 5 elements of the 512-dim histogram for brevity
-            feature_sample = data["feat"][:5]
+            # 2. Extract first 5 color values from the 512-dim histogram
+            color_sample = data["feat"][:5] 
             
-            print(f"ID {pid:2} | Pos: ({state[0]:4.1f}, {state[1]:4.1f}) | "
-                f"V: ({state[2]:4.1f}, {state[3]:4.1f}) | "
-                f"Age: {data['age']:3} | SGM Sample: {feature_sample}")
+            # 3. Court Coordinates
+            m_pos = data["display_pos"] if data["display_pos"] else (0.0, 0.0)
             
+            # 4. Bounding Box Dimensions
+            bb = data["last_bbox"]
+            w, h = (bb[2]-bb[0]), (bb[3]-bb[1])
+            x=data['age']
+            print(f"PLAYER ID: {pid:02d} | Status: {'[VISIBLE]' if data['age']==0 else f'[LOST (Age:{x})]'}")
+            print(f" ├─ PHYSICS: Screen_Pos({state[0]:.0f}, {state[1]:.0f}) | Velocity({state[2]:.2f}, {state[3]:.2f})")
+            print(f" ├─ COURT:   Width: {m_pos[0]:.2f}m, Depth: {m_pos[1]:.2f}m")
+            print(f" ├─ COLORS:  First 5 of 512 bins: {color_sample}") 
+            print(f" ├─ CAMERA:  Optical Flow: {len(data['flow_pts']) if data['flow_pts'] is not None else 0} tracking points")
+            print(f" └─ VISUAL:  BBox Height: {h}px | BBox Width: {w}px")
+            print("-" * 70)
   
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)

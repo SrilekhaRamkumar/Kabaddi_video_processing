@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from ultralytics import RTDETR
 from scipy.optimize import linear_sum_assignment
 from threading import Thread
 from queue import Queue
@@ -8,11 +9,12 @@ import time
 import torch
 import os
 import hashlib
+
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
 
-VIDEO_PATH = "Videos/raid1.mp4"
+VIDEO_PATH = "Videos/raid3.mp4"
 
 class VideoStream:
     def __init__(self, path, queue_size=5):
@@ -141,11 +143,11 @@ def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
 # ======================================================
 # MAIN LOOP
 # ======================================================
-# To this:
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device used: ",device)
-model = YOLO("yolov8n.pt").to(device)
+model = YOLO("yolo26m.pt").to(device)
+# model = RTDETR("rtdetr-l.pt").to(device)
 
 vs = VideoStream(VIDEO_PATH).start()
 prev_gray = None
@@ -156,7 +158,7 @@ frame_idx = 0
 cv2.namedWindow("Video (Integrated)")
 cv2.namedWindow("Half Court (2D)")
 
-# Cursor Tracking Logic ---
+# Cursor Tracking Logic
 cursor_court_pos = None
 
 def mouse_tracker(event, x, y, flags, param):
@@ -171,17 +173,16 @@ def mouse_tracker(event, x, y, flags, param):
 cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 # ---------------------------------------
 
-# 1. Generate unique path for the output
+
 path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
 output_filename = f"Videos/processed_{path_hash}.mp4"
 
-# 2. Define canvas dimensions regardless of recording status
+
 vis_w = int(1920 * DISPLAY_SCALE)
 vis_h = int(1080 * DISPLAY_SCALE)
 canvas_w = vis_w + COURT_W 
 canvas_h = max(vis_h, COURT_H)
 
-# 3. Check if file exists - Only initialize 'out' if it does NOT exist
 if os.path.exists(output_filename):
     print(f"Playback only: {output_filename} already exists. Skipping recording.")
     out = None 
@@ -189,9 +190,6 @@ else:
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
     print(f"Recording to: {output_filename}")
-
-# The loop 'while vs.running():' will now run for both cases.
-
 
 while vs.running():
     frame = vs.read()
@@ -202,7 +200,6 @@ while vs.running():
     vis = frame.copy()
     mat = mat_base.copy()
 
-    # Draw court lines on video
     for (p1, p2) in lines.values():
         cv2.line(vis, p1, p2, (255, 0, 0), 2)
 
@@ -303,7 +300,7 @@ while vs.running():
             
             mx, my = court_to_pixel(*data["display_pos"])
             
-            # RESTORED: Dynamic Dot Sizing & Box
+
             bh = data["last_bbox"][3] - data["last_bbox"][1]
             scale = np.clip((bh - 80) / 220, 0, 1)
             dot_rad = int(5 + scale * 8)
@@ -312,20 +309,18 @@ while vs.running():
             cv2.rectangle(mat, (mx-20, my-20), (mx+20, my+20), (0, 0, 0), 1)
             cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-            # --- ADD THIS: Render live cursor dot on mat ---
     if cursor_court_pos is not None:
         cx, cy = cursor_court_pos
-        # Only draw if within reasonable court bounds
+        # Court bounds
         if -1 < cx < 11 and -1 < cy < 7.5:
             mx, my = court_to_pixel(cx, cy)
-            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1) # Yellow solid dot
-            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)      # Black outline
-    # -----------------------------------------------
+            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1) 
+            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)      
 
     prev_gray = gray.copy()
 
 
-    # Print Debug Info every 30 frames
+    # Debug Info every 30 frames
     if frame_idx % 30 == 0:
         print(f"\n--- Frame: {frame_idx} | Active Players: {len(GALLERY)} ---")
         for pid, data in GALLERY.items():
@@ -333,8 +328,8 @@ while vs.running():
             state = data["kf"].statePost.flatten()
             
             # 2. Access SGM (Spatial-Global Matching / Appearance Feature) 
-            # Printing only the first 5 elements of the 512-dim histogram for brevity
-            feature_sample = data["feat"][:5] 
+            # First 5 elements of the 512-dim histogram for brevity
+            feature_sample = data["feat"][:5]
             
             print(f"ID {pid:2} | Pos: ({state[0]:4.1f}, {state[1]:4.1f}) | "
                 f"V: ({state[2]:4.1f}, {state[3]:4.1f}) | "
@@ -346,7 +341,6 @@ while vs.running():
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
     
-    # Write to file
     if out is not None:
         out.write(combined_frame)
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))

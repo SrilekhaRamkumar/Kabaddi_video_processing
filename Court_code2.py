@@ -10,6 +10,7 @@ import torch
 import os
 import hashlib
 
+#COMMIT CHECK
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
@@ -44,6 +45,35 @@ class VideoStream:
 
     def running(self):
         return not self.stopped or not self.queue.empty()
+    
+class InteractionProposalEngine:
+    """Encodes atomic actions into <S, I, O> triplets for the AFGN module."""
+    def __init__(self):
+        self.candidate_proposals = []
+
+    def reset_proposals(self):
+        self.candidate_proposals = []
+
+    def encode_hhi(self, raider_id, defender_id, r_pos, d_pos, r_vel, d_vel, r_feat, d_feat):
+        """Human-Human Interaction Proposal (Raider vs Defender)."""
+        dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
+        spatial_mask = [d_pos[0]-r_pos[0], d_pos[1]-r_pos[1]] # Relative vector
+        
+        self.candidate_proposals.append({
+            "type": "HHI",
+            "S": raider_id, "O": defender_id, "I": "POTENTIAL_CONTACT",
+            "features": {"dist": dist, "rel_vel": np.linalg.norm(np.array(r_vel)-np.array(d_vel)),
+                         "mask": spatial_mask, "emb": (0.5*r_feat + 0.5*d_feat).tolist()}
+        })
+
+    def encode_hli(self, player_id, line_name, p_pos, line_y):
+        """Human-Line Interaction Proposal (Player vs Court Line)."""
+        dist_to_line = abs(p_pos[1] - line_y)
+        self.candidate_proposals.append({
+            "type": "HLI",
+            "S": player_id, "O": line_name, "I": "LINE_PROXIMITY",
+            "features": {"dist": dist_to_line, "active": dist_to_line < 0.25}
+        })
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -55,8 +85,10 @@ CONF_THRESH = 0.4
 SMOOTH_ALPHA = 0.25 
 MAX_PLAYERS = 8
 MAX_AGE=200
-MODEL1 = "yolo26m.pt"
+MODEL1 = "yolov8n.pt"
+cursor_court_pos = None
 LINE_MARGIN = 0.6 
+proposal_engine = InteractionProposalEngine()
 
 # IMAGE-SPACE COURT LINES
 lines = {
@@ -146,6 +178,9 @@ def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
 # ======================================================
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+if device == "cpu":
+    MODEL1="yolov8n.pt"
 print("Device used: ",device)
 model = YOLO(MODEL1).to(device)
 # model = RTDETR("rtdetr-l.pt").to(device)
@@ -168,9 +203,6 @@ MIN_FRAMES_FOR_DECISION = 40
 BAULK_Y = 3.75
 ASSIGN_FRAME = 70   # assign raider after this frame
 
-cv2.namedWindow("Video (Integrated)")
-cv2.namedWindow("Half Court (2D)")
-
 # Cursor Tracking Logic
 cursor_court_pos = None
 
@@ -182,6 +214,12 @@ def mouse_tracker(event, x, y, flags, param):
         pt = np.array([[[orig_x, orig_y]]], dtype=np.float32)
         mapped = cv2.perspectiveTransform(pt, H)[0][0]
         cursor_court_pos = (mapped[0], mapped[1])
+
+cv2.namedWindow("Video (Integrated)")
+cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
+cv2.namedWindow("Half Court (2D)")
+
+
 
 cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 # ---------------------------------------
@@ -204,6 +242,48 @@ else:
     out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
     print(f"Recording to: {output_filename}")
 
+def mouse_tracker(event, x, y, flags, param):
+    global cursor_court_pos
+
+    if event == cv2.EVENT_MOUSEMOVE:
+
+        # Convert displayed coordinates back to original frame scale
+        orig_x = x / DISPLAY_SCALE
+        orig_y = y / DISPLAY_SCALE
+
+        pt = np.array([[[orig_x, orig_y]]], dtype=np.float32)
+
+        mapped = cv2.perspectiveTransform(pt, H)
+
+        cursor_court_pos = (mapped[0][0][0], mapped[0][0][1])
+
+def log_event(event_type, player_id, frame_idx):
+    EVENT_LOG.append({
+        "frame": frame_idx,
+        "player": player_id,
+        "type": event_type,
+        "investigation_until": frame_idx + INTERACTION_WINDOW
+    })
+
+# ======================================================
+# RULE / INTERACTION ENGINE STATE
+# ======================================================
+
+EVENT_LOG = []
+touch_confirmed = False
+
+INTERACTION_WINDOW = 20  # frames for future investigation
+INTERACTION_COUNT=0
+
+MIDDLE_Y = 0.0
+BAULK_Y = 3.75
+BONUS_Y = 4.75
+END_LINE_Y = 6.5
+
+LINE_MARGIN = 0.25
+LOBBY_LEFT = 0.75
+LOBBY_RIGHT = 9.25
+
 while vs.running():
     frame = vs.read()
     if frame is None: continue
@@ -212,6 +292,18 @@ while vs.running():
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     vis = frame.copy()
     mat = mat_base.copy()
+    
+
+    if cursor_court_pos is not None:
+        cx, cy = cursor_court_pos
+
+        # Only draw if inside court bounds
+        if -1 < cx < 11 and -1 < cy < 7.5:
+            mx, my = court_to_pixel(cx, cy)
+
+            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1)
+            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
+
 
     for (p1, p2) in lines.values():
         cv2.line(vis, p1, p2, (255, 0, 0), 2)
@@ -339,93 +431,10 @@ while vs.running():
 
             cv2.rectangle(mat, (mx-20, my-20), (mx+20, my+20), (0, 0, 0), 1)
             cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        else:
+            data["display_pos"]=None
 
-    # ======================================================
-    # PRIORITY-1 RAIDER DETECTION (CONVERGENCE)
-    # ======================================================
-
-    if not RAID_ASSIGNMENT_DONE:
-
-        active = []
-        for pid, data in GALLERY.items():
-            if data["age"] == 0 and data["display_pos"] is not None:
-                active.append(pid)
-
-        convergence_scores = {pid: 0 for pid in active}
-
-        for i in active:
-            xi, yi = GALLERY[i]["display_pos"]
-            vi_state = GALLERY[i]["kf"].statePost.flatten()
-            vi = np.array([vi_state[2], vi_state[3]])
-
-            for j in active:
-                if i == j:
-                    continue
-
-                xj, yj = GALLERY[j]["display_pos"]
-                vj_state = GALLERY[j]["kf"].statePost.flatten()
-                vj = np.array([vj_state[2], vj_state[3]])
-
-                dx = xi - xj
-                dy = yi - yj
-                dist = np.sqrt(dx*dx + dy*dy) + 1e-6
-
-                dir_to_i = np.array([dx/dist, dy/dist])
-
-                approach_strength = np.dot(vj, dir_to_i)
-
-                if approach_strength > 0:
-                    convergence_scores[i] += approach_strength
-
-        # ---- Accumulate Scores Over Frames ----
-        for pid, score in convergence_scores.items():
-            if pid not in RAIDER_CONV_ACCUM:
-                RAIDER_CONV_ACCUM[pid] = 0
-            RAIDER_CONV_ACCUM[pid] += score
-
-        # ---- Assign Raider After Enough Frames ----
-        if frame_idx >= MIN_FRAMES_FOR_DECISION:
-            best_score = -1
-            best_id = None
-
-            for pid, total_score in RAIDER_CONV_ACCUM.items():
-
-    # Must exist in stats
-                if pid not in RAIDER_STATS:
-                    continue
-
-                rec = RAIDER_STATS[pid]
-
-                # Must have enough observation
-                if rec["frames"] < 10:
-                    continue
-
-                # Defender elimination rule
-                ratio = rec["behind_baulk_frames"] / rec["frames"]
-
-                # If mostly behind baulk/bonus → eliminate
-                if ratio > 0.6:
-                    continue
-
-                # Select best convergence score among valid candidates
-                if total_score > best_score:
-                    best_score = total_score
-                    best_id = pid
-
-         
-            RAIDER_ID = best_id
-            RAID_ASSIGNMENT_DONE = True
-
-            print("🔥 RAIDER IDENTIFIED (Convergence):", RAIDER_ID)
-
-
-    if cursor_court_pos is not None:
-        cx, cy = cursor_court_pos
-        # Court bounds
-        if -1 < cx < 11 and -1 < cy < 7.5:
-            mx, my = court_to_pixel(cx, cy)
-            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1) 
-            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)      
+        
 
     # ======================================================
     # RAIDER STATS COLLECTION (FIRST PHASE)
@@ -466,152 +475,313 @@ while vs.running():
 
 
 
-    # ======================================================
-    # PRIORITY-1 RAIDER DETECTION (CONVERGENCE MODEL)
-    # ======================================================
-
-    if not RAID_ASSIGNMENT_DONE:
-
-        active = []
-        for pid, data in GALLERY.items():
-            if data["age"] == 0 and data["display_pos"] is not None:
-                active.append(pid)
-
-        convergence_scores = {pid: 0 for pid in active}
-
-        for i in active:
-            xi, yi = GALLERY[i]["display_pos"]
-            vi = GALLERY[i]["kf"].statePost.flatten()[2:4]
-
-            for j in active:
-                if i == j:
-                    continue
-
-                xj, yj = GALLERY[j]["display_pos"]
-                vj = GALLERY[j]["kf"].statePost.flatten()[2:4]
-
-                dx = xi - xj
-                dy = yi - yj
-                dist = np.sqrt(dx*dx + dy*dy) + 1e-6
-
-                dir_to_i = np.array([dx/dist, dy/dist])
-                vj_vec = np.array(vj)
-
-                # Projection of defender velocity toward i
-                approach_strength = np.dot(vj_vec, dir_to_i)
-
-                if approach_strength > 0:
-                    convergence_scores[i] += approach_strength
-
+   
     # =====================================================
     # REVISED RAIDER ASSIGNMENT (Safety-first logic)
     # ======================================================
 
-    if not RAID_ASSIGNMENT_DONE and frame_idx == ASSIGN_FRAME:
-        best_score = -1000 # Start very low
+    if not RAID_ASSIGNMENT_DONE and frame_idx >= ASSIGN_FRAME:
+
+        best_score = -1e9
         best_id = None
 
-        for pid, rec in RAIDER_STATS.items():
-            # 1. DISQUALIFY: If the player started the raid already deep in the court
-            # In Kabaddi, the raider starts at y=0 (midline) and moves to y=6.5.
-            # If they were first seen behind the bonus line (y > 4.75), they are likely a defender.
-            if rec["min_y"] > 3.0: 
-                continue
+        visible_players = [pid for pid, d in GALLERY.items()
+                        if d["display_pos"] is not None and d["age"] == 0]
 
-            # 2. DISQUALIFY: If they haven't been seen for enough frames
-            if rec["frames"] < 15:
-                continue
-
-            # 3. SCORING: 
-            # We want someone moving from a low Y to a high Y (Positive Displacement)
-            displacement = rec["max_y"] - rec["min_y"]
-            
-            # Average velocity in the Y direction (Positive means moving toward defenders)
-            avg_vy = np.mean(rec["vy_list"]) if rec["vy_list"] else 0
-            
-            # Final Score Calculation
-            # We reward displacement and moving "down" the court (positive avg_vy)
-            score = (displacement * 5.0) + (avg_vy * 2.0)
-
-            # 4. BONUS: Reward crossing the mid-line area early
-            if rec["min_y"] < 1.0:
-                score += 10 
-
-            if score > best_score:
-                best_score = score
-                best_id = pid
-
-        if best_id is not None:
-            RAIDER_ID = best_id
-            RAID_ASSIGNMENT_DONE = True
-            print(f"🔥 RAIDER IDENTIFIED: {RAIDER_ID} (Score: {best_score:.2f})")
-        else:
-            # Fallback: If no one fits, extend the assignment window
+        if len(visible_players) < 3:
             ASSIGN_FRAME += 10
-    # ======================================================
-    # MODULE-2: INTERACTION PROPOSAL LAYER
-    # ======================================================
+        else:
+            for pid in visible_players:
 
-    active_players = []
+                rec = RAIDER_STATS.get(pid, None)
+                if rec is None or rec["frames"] < 20:
+                    continue
+
+
+                # -------------------------------------------------
+                # ELIMINATE PLAYERS MOSTLY BEHIND BONUS LINE
+                # -------------------------------------------------
+
+                #BONUS_Y = 2.75  # already defined court bonus line depth
+
+                behind_bonus_frames = 0
+
+                # Count how many frames player stayed deep behind bonus
+                min_depth = rec["max_y"]
+
+                # If player’s minimum depth is always high,
+                # it means he never came forward (strong defender signal)
+                if rec["min_y"] > BAULK_Y-1:
+                    continue
+
+                avg_vy = np.mean(rec["vy_list"]) if rec["vy_list"] else 0
+                if abs(avg_vy) < 0.05: # Threshold for 'stationary'
+                    continue
+
+                # ADDITIONAL SAFETY: Eliminate players who appeared deep in the court (close to the end line) early on.
+                
+
+                # Strong elimination rule:
+                # If most observed frames are behind bonus, remove
+                deep_ratio = sum(1 for y in [rec["max_y"]] if y > BONUS_Y) / rec["frames"]
+
+                if rec["min_y"] > BONUS_Y - 0.3:
+                    continue
+
+
+                xi, yi = GALLERY[pid]["display_pos"]
+                state_i = GALLERY[pid]["kf"].statePost.flatten()
+                vxi, vyi = state_i[2], state_i[3]
+
+                # -----------------------------
+                # 1. DEPTH DOMINANCE SCORE
+                # -----------------------------
+                depths = [GALLERY[o]["display_pos"][1]
+                        for o in visible_players if o != pid]
+
+                if len(depths) == 0:
+                    continue
+
+                depth_rank = sum(yi > d for d in depths)
+
+                # -----------------------------
+                # 2. CONVERGENCE SCORE
+                # -----------------------------
+                convergence_count = 0
+                close_players = 0
+
+                for other in visible_players:
+                    if other == pid:
+                        continue
+
+                    xj, yj = GALLERY[other]["display_pos"]
+                    state_j = GALLERY[other]["kf"].statePost.flatten()
+                    vxj, vyj = state_j[2], state_j[3]
+
+                    dx = xi - xj
+                    dy = yi - yj
+                    dist = np.sqrt(dx*dx + dy*dy) + 1e-6
+
+                    if dist < 2.5:
+                        close_players += 1
+
+                    dir_vec = np.array([dx/dist, dy/dist])
+                    vel_vec = np.array([vxj, vyj])
+
+                    if np.dot(vel_vec, dir_vec) > 0:
+                        convergence_count += 1
+
+                # -----------------------------
+                # 3. MOVEMENT UNIQUENESS
+                # Raider usually has higher speed magnitude
+                # -----------------------------
+                speed = np.sqrt(vxi*vxi + vyi*vyi)
+
+                # -----------------------------
+                # 4. ENTRY PRIOR (appeared later boost)
+                # -----------------------------
+                entry_prior = rec["first_seen"] / frame_idx
+
+                # -----------------------------
+                # FINAL SCORE
+                # -----------------------------
+                score = (
+                    depth_rank * 4.0 +
+                    convergence_count * 3.5 +
+                    close_players * 2.0 +
+                    speed * 1.5 +
+                    entry_prior * 5.0
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_id = pid
+
+            if best_id is not None:
+                RAIDER_ID = best_id
+                RAID_ASSIGNMENT_DONE = True
+                print(f"RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
+
+    # ======================================================
+    # MODULE-2: INTERACTION LOGIC & PROPOSAL LAYER
+    # ======================================================
+    proposal_engine.reset_proposals()
+    
+    # NEW: Define player_states for existing features and HHI/HLI encoding
     player_states = {}
+    active_players = [pid for pid, d in GALLERY.items() if d["age"] == 0 and d["display_pos"] is not None]
+    
+    for pid in active_players:
+        state = GALLERY[pid]["kf"].statePost.flatten()
+        player_states[pid] = {
+            "pos": GALLERY[pid]["display_pos"],
+            "vel": (state[2], state[3]),
+            "feat": GALLERY[pid]["feat"]
+        }
+    
+    interaction_candidates = [] # For your existing line-drawing feature
 
-    for pid, data in GALLERY.items():
-        if data["age"] == 0 and data["display_pos"] is not None:
-            active_players.append(pid)
-            state = data["kf"].statePost.flatten()
-            player_states[pid] = {
-                "pos": data["display_pos"],          # (cx, cy) in meters
-                "vel": (state[2], state[3])         # (vx, vy) in pixels/frame
-            }
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID in GALLERY:
+        r_data = GALLERY[RAIDER_ID]
+        if r_data["display_pos"]:
+            r_pos = r_data["display_pos"]
+            r_vel = (r_data["kf"].statePost[2][0], r_data["kf"].statePost[3][0])
 
-    interaction_candidates = []
+            # B. Generate Human-Human (HHI) Proposals
+            for pid in active_players:
+                if pid == RAIDER_ID: continue
+                
+                d_pos = player_states[pid]["pos"]
+                d_vel = player_states[pid]["vel"]
+                d_feat = player_states[pid]["feat"]
+                
+                dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
+                
+                # Geometric Gating: Propose within 1.5m
+                if dist < 1.5:
+                    proposal_engine.encode_hhi(RAIDER_ID, pid, r_pos, d_pos, r_vel, d_vel, r_data["feat"], d_feat)
+                    
+                    # Populate candidates for your existing line drawing feature
+                    interaction_candidates.append({"pair": (RAIDER_ID, pid), "distance": dist})
+                    
+                    if not touch_confirmed and dist < 1.0:
+                        touch_confirmed = True
+                        log_event("RAIDER_DEFENDER_CONTACT", RAIDER_ID, frame_idx)
 
-    DIST_THRESH = 1.0  # meters
+            # C. Generate Human-Line (HLI) Proposals
+            proposal_engine.encode_hli(RAIDER_ID, "BONUS", r_pos, BONUS_Y)
+            proposal_engine.encode_hli(RAIDER_ID, "BAULK", r_pos, BAULK_Y)
+            
+            for pid, pdata in GALLERY.items():
+                if pdata["display_pos"]:
+                    proposal_engine.encode_hli(pid, "END_LINE", pdata["display_pos"], END_LINE_Y)
 
-    for i in range(len(active_players)):
-        for j in range(i+1, len(active_players)):
+    # ------------------------------------------------------
+    # DEFENDER TOUCHING END LINE
+    # ------------------------------------------------------
 
-            pid_i = active_players[i]
-            pid_j = active_players[j]
+    for pid, pdata in player_states.items():
 
-            xi, yi = player_states[pid_i]["pos"]
-            xj, yj = player_states[pid_j]["pos"]
+        if RAIDER_ID is not None and pid != RAIDER_ID:
 
-            vx_i, vy_i = player_states[pid_i]["vel"]
-            vx_j, vy_j = player_states[pid_j]["vel"]
+            px, py = pdata["pos"]
 
-            # Distance in meters
-            d = np.sqrt((xi - xj)**2 + (yi - yj)**2)
+            if abs(py - END_LINE_Y) < LINE_MARGIN:
+                log_event("DEFENDER_ENDLINE_TOUCH", pid, frame_idx)
 
-            # Relative velocity magnitude
-            v_rel = np.sqrt((vx_i - vx_j)**2 + (vy_i - vy_j)**2)
+    # ------------------------------------------------------
+    # RAIDER TOUCHING BONUS / BAULK
+    # ------------------------------------------------------
 
-            if d < DIST_THRESH:
-                interaction_candidates.append({
-                    "pair": (pid_i, pid_j),
-                    "distance": d,
-                    "v_rel": v_rel
-                })
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID in player_states:
+
+        rx, ry = player_states[RAIDER_ID]["pos"]
+
+        if abs(ry - BONUS_Y) < LINE_MARGIN:
+            log_event("RAIDER_BONUS_TOUCH", RAIDER_ID, frame_idx)
+
+        if abs(ry - BAULK_Y) < LINE_MARGIN:
+            log_event("RAIDER_BAULK_TOUCH", RAIDER_ID, frame_idx)
+    
+    # ------------------------------------------------------
+    # LOBBY ENTRY RESTRICTION (BEFORE TOUCH)
+    # ------------------------------------------------------
+
+    for pid, pdata in player_states.items():
+
+        px, py = pdata["pos"]
+
+        if not touch_confirmed:
+
+            if px < LOBBY_LEFT or px > LOBBY_RIGHT:
+                log_event("ILLEGAL_LOBBY_ENTRY_BEFORE_TOUCH", pid, frame_idx)
+    
+    # ------------------------------------------------------
+    # RAIDER RETURN TO MIDDLE (AFTER TOUCH)
+    # ------------------------------------------------------
+
+    if touch_confirmed and RAIDER_ID in player_states:
+
+        rx, ry = player_states[RAIDER_ID]["pos"]
+
+        if ry < 0.8:
+            log_event("RAIDER_RETURNED_MIDDLE", RAIDER_ID, frame_idx)
+
+    # ------------------------------------------------------
+    # EVENT WINDOW CLEANUP / FUTURE INVESTIGATION
+    # ------------------------------------------------------
+
+    for event in EVENT_LOG:
+        if frame_idx <= event["investigation_until"]:
+            # This event is still active for analysis
+            pass
+
 
     # Optional Debug Visualization
     for cand in interaction_candidates:
-        p1 = cand["pair"][0]
-        p2 = cand["pair"][1]
+        p1, p2 = cand["pair"]
 
-        mx1, my1 = court_to_pixel(*player_states[p1]["pos"])
-        mx2, my2 = court_to_pixel(*player_states[p2]["pos"])
+        # SAFETY CHECK: Only draw if both players are currently "Active"
+        if p1 in player_states and p2 in player_states:
+            mx1, my1 = court_to_pixel(*player_states[p1]["pos"])
+            mx2, my2 = court_to_pixel(*player_states[p2]["pos"])
 
-        cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
+            cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
 
     prev_gray = gray.copy()
 
     # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
     # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
-    if frame_idx % 30 == 0:
-        print(f"\n" + "█"*70)
-        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL MEMORY ENTRIES: {len(GALLERY)}")
-        print("█"*70)
+
+    # ======================================================
+    # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
+    # ======================================================
+
+     # 1. Print Human-Human Interaction (HHI) Triplets
+    # ======================================================
+    # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
+    # ======================================================
+  
+    # 1. Print Human-Human Interaction (HHI) Triplets
+    hhi_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HHI"]
+    if hhi_proposals:
+        print(f" [HHI] PLAYER-TO-PLAYER TRIPLETS:")
+        for p in hhi_proposals:
+            # Replace IDs with "RAIDER" if they match
+            sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+            obj_label = "RAIDER" if p['O'] == RAIDER_ID else f"ID_{p['O']}"
+
+            INTERACTION_COUNT+=1
+            
+            # Format: [Frame] <Subject, Interaction, Object>
+            triplet = f"<{sub_label}, {p['I']}, {obj_label}>"
+            print(f"  ├─ Frame {frame_idx:05d} | {triplet:30} | Rel_Vel: {p['features']['rel_vel']:.2f} | Dist: {p['features']['dist']:.2f}m")
+
+    # 2. Print Human-Line Interaction (HLI) Triplets
+    hli_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HLI" and p["features"]["dist"] < 0.5]
+    if hli_proposals:
+        print(f"\n [HLI] PLAYER-TO-LINE TRIPLETS (Active Proximity):")
+        for p in hli_proposals:
+            # Replace Subject ID with "RAIDER" if it matches
+            sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+            INTERACTION_COUNT+=1
+            # Format: [Frame] <Subject, Interaction, Object>
+            triplet = f"<{sub_label}, {p['I']}, {p['O']}>"
+            status = "[TOUCHING]" if p["features"]["active"] else "[NEAR]"
+            print(f"  ├─ Frame {frame_idx:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
+
+    
         
+
+    if frame_idx % 30 == 0:
+        print(f"\n" + "█"*80)
+        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL INTERACTION PROPOSALS: {len(proposal_engine.candidate_proposals)}")
+        print("█"*80)
+        
+       
+
+        # 3. Existing Gallery Debug (Condensed)
+        print(f"\n [GALLERY] ACTIVE TRACKS: {len(GALLERY)}")
         for pid, data in GALLERY.items():
             # 1. Physics & State
             state = data["kf"].statePost.flatten() # [x, y, vx, vy]
@@ -646,7 +816,7 @@ while vs.running():
     
     if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'): break
 
-
-if 'out' in locals():
+print("Total number of Interactions: ", INTERACTION_COUNT)
+if out is not None:
     out.release()
 cv2.destroyAllWindows()

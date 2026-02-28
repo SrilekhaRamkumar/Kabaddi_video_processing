@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from ultralytics import RTDETR
 from scipy.optimize import linear_sum_assignment
 from threading import Thread
 from queue import Queue
@@ -8,11 +9,13 @@ import time
 import torch
 import os
 import hashlib
+
+#COMMIT CHECK
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
 
-VIDEO_PATH = "D:/Codes/kabaddi/Phase-2/Videos/raid3.mp4"
+VIDEO_PATH = "Videos/raid1.mp4"
 
 class VideoStream:
     def __init__(self, path, queue_size=5):
@@ -53,6 +56,8 @@ CONF_THRESH = 0.4
 SMOOTH_ALPHA = 0.25 
 MAX_PLAYERS = 8
 MAX_AGE=200
+MODEL1 = "yolo26m.pt"
+cursor_court_pos = None
 LINE_MARGIN = 0.6 
 
 # IMAGE-SPACE COURT LINES
@@ -141,10 +146,14 @@ def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
 # ======================================================
 # MAIN LOOP
 # ======================================================
-# To this:
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = YOLO("yolov8n.pt").to(device)
+
+if device == "cpu":
+    MODEL1="yolov8n.pt"
+print("Device used: ",device)
+model = YOLO(MODEL1).to(device)
+# model = RTDETR("rtdetr-l.pt").to(device)
 
 vs = VideoStream(VIDEO_PATH).start()
 prev_gray = None
@@ -152,11 +161,42 @@ NEXT_ID = 0
 GALLERY = {}
 frame_idx = 0
 
+# ======================================================
+# RAIDER IDENTIFICATION (Single-side logic)
+# ======================================================
+RAIDER_ID = None
+RAIDER_STATS = {}
+RAID_ASSIGNMENT_DONE = False
+RAIDER_CONV_ACCUM = {}
+MIN_FRAMES_FOR_DECISION = 40
+
+BAULK_Y = 3.75
+ASSIGN_FRAME = 70   # assign raider after this frame
+
+# Cursor Tracking Logic
+cursor_court_pos = None
+
+def mouse_tracker(event, x, y, flags, param):
+    global cursor_court_pos
+    if event == cv2.EVENT_MOUSEMOVE:
+        # Map scaled window coordinates back to original video size
+        orig_x, orig_y = x / DISPLAY_SCALE, y / DISPLAY_SCALE
+        pt = np.array([[[orig_x, orig_y]]], dtype=np.float32)
+        mapped = cv2.perspectiveTransform(pt, H)[0][0]
+        cursor_court_pos = (mapped[0], mapped[1])
+
 cv2.namedWindow("Video (Integrated)")
+cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 cv2.namedWindow("Half Court (2D)")
 
+
+
+cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
+# ---------------------------------------
+
+
 path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
-output_filename = f"D:/Codes/kabaddi/Phase-2/Videos/processed_{path_hash}.mp4"
+output_filename = f"Videos/processed_{path_hash}.mp4"
 
 
 vis_w = int(1920 * DISPLAY_SCALE)
@@ -165,12 +205,27 @@ canvas_w = vis_w + COURT_W
 canvas_h = max(vis_h, COURT_H)
 
 if os.path.exists(output_filename):
-    print(f"Playback only: {output_filename} already exists.")
+    print(f"Playback only: {output_filename} already exists. Skipping recording.")
     out = None 
 else:
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
     print(f"Recording to: {output_filename}")
+
+def mouse_tracker(event, x, y, flags, param):
+    global cursor_court_pos
+
+    if event == cv2.EVENT_MOUSEMOVE:
+
+        # Convert displayed coordinates back to original frame scale
+        orig_x = x / DISPLAY_SCALE
+        orig_y = y / DISPLAY_SCALE
+
+        pt = np.array([[[orig_x, orig_y]]], dtype=np.float32)
+
+        mapped = cv2.perspectiveTransform(pt, H)
+
+        cursor_court_pos = (mapped[0][0][0], mapped[0][0][1])
 
 
 while vs.running():
@@ -182,7 +237,17 @@ while vs.running():
     vis = frame.copy()
     mat = mat_base.copy()
 
-    # Draw court lines on video
+    if cursor_court_pos is not None:
+        cx, cy = cursor_court_pos
+
+        # Only draw if inside court bounds
+        if -1 < cx < 11 and -1 < cy < 7.5:
+            mx, my = court_to_pixel(cx, cy)
+
+            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1)
+            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
+
+
     for (p1, p2) in lines.values():
         cv2.line(vis, p1, p2, (255, 0, 0), 2)
 
@@ -239,6 +304,18 @@ while vs.running():
                 ew, eh = int((x2-x1)*0.7), int((x2-x1)*0.22)
                 cv2.ellipse(vis, ((fx, fy), (ew, eh), 0), (255, 0, 0), 2)
                 cv2.putText(vis, f"ID {pid}", (x1, max(30, y1-12)), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                if RAID_ASSIGNMENT_DONE and pid == RAIDER_ID:
+                    cv2.putText(
+                        vis,
+                        "RAIDER",
+                        (x1 + 120, max(30, y1 - 12)),  # beside ID text
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 255, 255),   # yellow for distinction
+                        3
+                    )
+
+
                 cv2.circle(vis, (fx, fy), 5, (255, 0, 0), -1)
 
                 # PERFORMANCE TWEAK: Only refresh flow points periodically
@@ -274,7 +351,10 @@ while vs.running():
 
         # Homography Mapping
         mapped = cv2.perspectiveTransform(np.array([[[px, py]]], dtype=np.float32), H)[0][0]
+        
+
         cx, cy = mapped
+       
         if LINE_MARGIN < cx < 10 - LINE_MARGIN and LINE_MARGIN < cy < 6.5 - LINE_MARGIN:
             if data["display_pos"] is None: data["display_pos"] = (cx, cy)
             else:
@@ -283,40 +363,271 @@ while vs.running():
             
             mx, my = court_to_pixel(*data["display_pos"])
             
-            # RESTORED: Dynamic Dot Sizing & Box
+
             bh = data["last_bbox"][3] - data["last_bbox"][1]
             scale = np.clip((bh - 80) / 220, 0, 1)
             dot_rad = int(5 + scale * 8)
             
             cv2.circle(mat, (mx, my), dot_rad, (255, 0, 0), -1)
+            if pid == RAIDER_ID:
+                cv2.circle(mat, (mx, my), dot_rad + 6, (0, 0, 255), 3)
+
             cv2.rectangle(mat, (mx-20, my-20), (mx+20, my+20), (0, 0, 0), 1)
             cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
+        
+
+    # ======================================================
+    # RAIDER STATS COLLECTION (FIRST PHASE)
+    # ======================================================
+
+    if not RAID_ASSIGNMENT_DONE and frame_idx < ASSIGN_FRAME:
+
+        for pid, data in GALLERY.items():
+
+            if data["display_pos"] is None:
+                continue
+
+            cx, cy = data["display_pos"]
+
+            if pid not in RAIDER_STATS:
+                RAIDER_STATS[pid] = {
+                    "first_seen": frame_idx,
+                    "min_y": cy,
+                    "max_y": cy,
+                    "vy_list": [],
+                    "behind_baulk_frames": 0,
+                    "frames": 0
+                }
+
+            rec = RAIDER_STATS[pid]
+
+            rec["min_y"] = min(rec["min_y"], cy)
+            rec["max_y"] = max(rec["max_y"], cy)
+            rec["frames"] += 1
+
+            # Depth-based defender prior
+            if cy > BAULK_Y:
+                rec["behind_baulk_frames"] += 1
+
+            state = data["kf"].statePost.flatten()
+            vy = state[3]
+            rec["vy_list"].append(vy)
+
+
+
+   
+    # =====================================================
+    # REVISED RAIDER ASSIGNMENT (Safety-first logic)
+    # ======================================================
+
+    if not RAID_ASSIGNMENT_DONE and frame_idx >= ASSIGN_FRAME:
+
+        best_score = -1e9
+        best_id = None
+
+        visible_players = [pid for pid, d in GALLERY.items()
+                        if d["display_pos"] is not None and d["age"] == 0]
+
+        if len(visible_players) < 3:
+            ASSIGN_FRAME += 10
+        else:
+            for pid in visible_players:
+
+                rec = RAIDER_STATS.get(pid, None)
+                if rec is None or rec["frames"] < 20:
+                    continue
+
+
+                # -------------------------------------------------
+                # ELIMINATE PLAYERS MOSTLY BEHIND BONUS LINE
+                # -------------------------------------------------
+
+                BONUS_Y = 2.75  # already defined court bonus line depth
+
+                behind_bonus_frames = 0
+
+                # Count how many frames player stayed deep behind bonus
+                min_depth = rec["max_y"]
+
+                # If player’s minimum depth is always high,
+                # it means he never came forward (strong defender signal)
+                if rec["min_y"] > BONUS_Y:
+                    continue
+
+                # Strong elimination rule:
+                # If most observed frames are behind bonus, remove
+                deep_ratio = sum(1 for y in [rec["max_y"]] if y > BONUS_Y) / rec["frames"]
+
+                if rec["min_y"] > BONUS_Y - 0.3:
+                    continue
+
+
+                xi, yi = GALLERY[pid]["display_pos"]
+                state_i = GALLERY[pid]["kf"].statePost.flatten()
+                vxi, vyi = state_i[2], state_i[3]
+
+                # -----------------------------
+                # 1. DEPTH DOMINANCE SCORE
+                # -----------------------------
+                depths = [GALLERY[o]["display_pos"][1]
+                        for o in visible_players if o != pid]
+
+                if len(depths) == 0:
+                    continue
+
+                depth_rank = sum(yi > d for d in depths)
+
+                # -----------------------------
+                # 2. CONVERGENCE SCORE
+                # -----------------------------
+                convergence_count = 0
+                close_players = 0
+
+                for other in visible_players:
+                    if other == pid:
+                        continue
+
+                    xj, yj = GALLERY[other]["display_pos"]
+                    state_j = GALLERY[other]["kf"].statePost.flatten()
+                    vxj, vyj = state_j[2], state_j[3]
+
+                    dx = xi - xj
+                    dy = yi - yj
+                    dist = np.sqrt(dx*dx + dy*dy) + 1e-6
+
+                    if dist < 2.5:
+                        close_players += 1
+
+                    dir_vec = np.array([dx/dist, dy/dist])
+                    vel_vec = np.array([vxj, vyj])
+
+                    if np.dot(vel_vec, dir_vec) > 0:
+                        convergence_count += 1
+
+                # -----------------------------
+                # 3. MOVEMENT UNIQUENESS
+                # Raider usually has higher speed magnitude
+                # -----------------------------
+                speed = np.sqrt(vxi*vxi + vyi*vyi)
+
+                # -----------------------------
+                # 4. ENTRY PRIOR (appeared later boost)
+                # -----------------------------
+                entry_prior = rec["first_seen"] / frame_idx
+
+                # -----------------------------
+                # FINAL SCORE
+                # -----------------------------
+                score = (
+                    depth_rank * 4.0 +
+                    convergence_count * 3.5 +
+                    close_players * 2.0 +
+                    speed * 1.5 +
+                    entry_prior * 5.0
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_id = pid
+
+            if best_id is not None:
+                RAIDER_ID = best_id
+                RAID_ASSIGNMENT_DONE = True
+                print(f"🔥 RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
+
+    # ======================================================
+    # MODULE-2: INTERACTION PROPOSAL LAYER
+    # ======================================================
+
+    active_players = []
+    player_states = {}
+
+    for pid, data in GALLERY.items():
+        if data["age"] == 0 and data["display_pos"] is not None:
+            active_players.append(pid)
+            state = data["kf"].statePost.flatten()
+            player_states[pid] = {
+                "pos": data["display_pos"],          # (cx, cy) in meters
+                "vel": (state[2], state[3])         # (vx, vy) in pixels/frame
+            }
+
+    interaction_candidates = []
+
+    DIST_THRESH = 1.0  # meters
+
+    if RAIDER_ID is not None and RAID_ASSIGNMENT_DONE:
+
+        if RAIDER_ID in player_states:
+
+            xi, yi = player_states[RAIDER_ID]["pos"]
+            vxi, vyi = player_states[RAIDER_ID]["vel"]
+
+            for pid, pdata in player_states.items():
+
+                if pid == RAIDER_ID:
+                    continue
+
+                xj, yj = pdata["pos"]
+                vxj, vyj = pdata["vel"]
+
+                d = np.sqrt((xi - xj)**2 + (yi - yj)**2)
+                v_rel = np.sqrt((vxi - vxj)**2 + (vyi - vyj)**2)
+
+                if d < DIST_THRESH:
+                    interaction_candidates.append({
+                        "pair": (RAIDER_ID, pid),
+                        "distance": d,
+                        "v_rel": v_rel
+                    })
+
+
+    # Optional Debug Visualization
+    for cand in interaction_candidates:
+        p1 = cand["pair"][0]
+        p2 = cand["pair"][1]
+
+        mx1, my1 = court_to_pixel(*player_states[p1]["pos"])
+        mx2, my2 = court_to_pixel(*player_states[p2]["pos"])
+
+        cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
+
     prev_gray = gray.copy()
 
-
-    # Print Debug Info every 30 frames
+    # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
+    # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
     if frame_idx % 30 == 0:
-        print(f"\n--- Frame: {frame_idx} | Active Players: {len(GALLERY)} ---")
+        print(f"\n" + "█"*70)
+        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL MEMORY ENTRIES: {len(GALLERY)}")
+        print("█"*70)
+        
         for pid, data in GALLERY.items():
-            # 1. Access Kalman State (x, y, vx, vy)
-            state = data["kf"].statePost.flatten()
+            # 1. Physics & State
+            state = data["kf"].statePost.flatten() # [x, y, vx, vy]
             
-            # 2. Access SGM (Spatial-Global Matching / Appearance Feature) 
-            # Printing only the first 5 elements of the 512-dim histogram for brevity
-            feature_sample = data["feat"][:5] 
+            # 2. Extract first 5 color values from the 512-dim histogram
+            color_sample = data["feat"][:5] 
             
-            print(f"ID {pid:2} | Pos: ({state[0]:4.1f}, {state[1]:4.1f}) | "
-                f"V: ({state[2]:4.1f}, {state[3]:4.1f}) | "
-                f"Age: {data['age']:3} | SGM Sample: {feature_sample}")
+            # 3. Court Coordinates
+            m_pos = data["display_pos"] if data["display_pos"] else (0.0, 0.0)
             
+            # 4. Bounding Box Dimensions
+            bb = data["last_bbox"]
+            w, h = (bb[2]-bb[0]), (bb[3]-bb[1])
+            x=data['age']
+            print(f"PLAYER ID: {pid:02d} | Status: {'[VISIBLE]' if data['age']==0 else f'[LOST (Age:{x})]'}")
+            print(f" ├─ PHYSICS: Screen_Pos({state[0]:.0f}, {state[1]:.0f}) | Velocity({state[2]:.2f}, {state[3]:.2f})")
+            print(f" ├─ COURT:   Width: {m_pos[0]:.2f}m, Depth: {m_pos[1]:.2f}m")
+            print(f" ├─ COLORS:  First 5 of 512 bins: {color_sample}") 
+            print(f" ├─ CAMERA:  Optical Flow: {len(data['flow_pts']) if data['flow_pts'] is not None else 0} tracking points")
+            print(f" └─ VISUAL:  BBox Height: {h}px | BBox Width: {w}px")
+            print("-" * 70)
   
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
     
-    # Write to file
     if out is not None:
         out.write(combined_frame)
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))

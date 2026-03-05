@@ -10,7 +10,7 @@ import torch
 import os
 import hashlib
 
-#COMMIT CHECK
+#COMMIT CHECK 5/3
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
@@ -45,6 +45,126 @@ class VideoStream:
 
     def running(self):
         return not self.stopped or not self.queue.empty()
+    
+class InteractionProposalEngine:
+    """Encodes atomic actions into <S, I, O> triplets with strict per-frame uniqueness."""
+    def __init__(self):
+        self.candidate_proposals = []
+        self._frame_cache = {} # Key: (frame, type, S, O) -> value: proposal_dict
+
+    def reset_proposals(self):
+        """Clears accumulated triplets for the 30-frame reasoning window."""
+        self.candidate_proposals = []
+        self._frame_cache = {}
+
+    def _add_unique_proposal(self, frame_idx, proposal):
+        """Maintains only the highest-confidence (closest) triplet per frame."""
+        # Create a unique key for this specific interaction event
+        key = (frame_idx, proposal["type"], proposal["S"], proposal["O"])
+        
+        if key not in self._frame_cache:
+            # First time seeing this interaction in this frame
+            self._frame_cache[key] = proposal
+        else:
+            # If it already exists, only update if the new one is 'closer' (higher contact chance)
+            if proposal["features"]["dist"] < self._frame_cache[key]["features"]["dist"]:
+                self._frame_cache[key] = proposal
+
+    def finalize_frame_proposals(self):
+        """Converts the unique frame cache into the main proposal list for the Graph Engine."""
+        # This is called once per frame after all detections are processed
+        for proposal in self._frame_cache.values():
+            self.candidate_proposals.append(proposal)
+        # Clear cache for the next frame while keeping the candidate_proposals history
+        self._frame_cache = {}
+
+    def encode_hhi(self, frame_idx, raider_id, defender_id, r_pos, d_pos, r_vel, d_vel, r_feat, d_feat):
+        dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
+        proposal = {
+            "frame": frame_idx,
+            "type": "HHI",
+            "S": raider_id, "O": defender_id, "I": "POTENTIAL_CONTACT",
+            "features": {
+                "dist": dist, 
+                "rel_vel": np.linalg.norm(np.array(r_vel)-np.array(d_vel)),
+                "mask": [d_pos[0]-r_pos[0], d_pos[1]-r_pos[1]], 
+                "emb": (0.5*r_feat + 0.5*d_feat).tolist()
+            }
+        }
+        self._add_unique_proposal(frame_idx, proposal)
+
+    def encode_hli(self, frame_idx, player_id, line_name, p_pos, line_y):
+        dist_to_line = abs(p_pos[1] - line_y)
+        proposal = {
+            "frame": frame_idx,
+            "type": "HLI",
+            "S": player_id, "O": line_name, "I": "LINE_PROXIMITY",
+            "features": {"dist": dist_to_line, "active": dist_to_line < 0.25}
+        }
+        self._add_unique_proposal(frame_idx, proposal)
+
+class DynamicInteractionGraph:
+    """Constructs a structured graph from triplets using AFGN and Lee et al. methods."""
+    def __init__(self, top_k=4):
+        self.top_k = top_k
+        self.active_nodes = []
+        self.adjacency_matrix = None
+
+    def build_graph(self, proposals, gallery, raider_id):
+        # 1. AFGN: Calculate Influence Weights for Active Selection
+        # Initialize only for players currently in the gallery
+        influence = {pid: 0.0 for pid in gallery if gallery[pid]["age"] == 0}
+        
+        for p in proposals:
+            if p["type"] == "HHI":
+                # Influence is inversely proportional to distance
+                weight = 1.0 / (p["features"]["dist"] + 1e-6)
+                
+                # SAFETY CHECK: Only update influence if the player is still 'Active'
+                if p["S"] in influence:
+                    influence[p["S"]] += weight
+                if p["O"] in influence:
+                    influence[p["O"]] += weight
+                    
+        # 2. AFGN: Top-k Pruning (Ensures Raider is always included)
+        sorted_ids = sorted(influence.keys(), key=lambda x: influence[x], reverse=True)
+        self.active_nodes = [pid for pid in sorted_ids if pid != raider_id][:self.top_k - 1]
+        self.active_nodes.append(raider_id) # The 'Subject' is always active
+
+        # 3. Lee et al: Construct Adjacency Matrix using Diagonal Ratios
+        n = len(self.active_nodes)
+        self.adjacency_matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(n):
+                if i == j: continue
+                id_i, id_j = self.active_nodes[i], self.active_nodes[j]
+                
+                # Get Bounding Box Diagonals for perspective correction
+                bb_i, bb_j = gallery[id_i]["last_bbox"], gallery[id_j]["last_bbox"]
+                d_i = np.sqrt((bb_i[2]-bb_i[0])**2 + (bb_i[3]-bb_i[1])**2)
+                d_j = np.sqrt((bb_j[2]-bb_j[0])**2 + (bb_j[3]-bb_j[1])**2)
+                
+                # Diagonal Ratio Formula: min(di, dj) / max(di, dj)
+                r_ij = min(d_i, d_j) / max(d_i, d_j)
+                self.adjacency_matrix[i, j] = r_ij
+
+        return self.package_features(gallery)
+
+    def package_features(self, gallery):
+        """Encodes Spatiotemporal features for the Factor Graph."""
+        graph_data = {"nodes": [], "edges": self.adjacency_matrix.tolist()}
+        for pid in self.active_nodes:
+            state = gallery[pid]["kf"].statePost.flatten()
+            node_feat = {
+                "id": pid,
+                "role": "RAIDER" if pid == RAIDER_ID else "DEFENDER",
+                "motion": [float(state[2]), float(state[3])], # Velocity (vx, vy)
+                "visual": gallery[pid]["feat"].tolist(),     # HSV Embedding
+                "spatial": gallery[pid]["display_pos"]        # Normalized Mat (x, y)
+            }
+            graph_data["nodes"].append(node_feat)
+        return graph_data
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -56,9 +176,11 @@ CONF_THRESH = 0.4
 SMOOTH_ALPHA = 0.25 
 MAX_PLAYERS = 8
 MAX_AGE=200
-MODEL1 = "yolo26m.pt"
+MODEL1 = "yolov8n.pt"
 cursor_court_pos = None
 LINE_MARGIN = 0.6 
+proposal_engine = InteractionProposalEngine()
+graph_engine = DynamicInteractionGraph(top_k=4)
 
 # IMAGE-SPACE COURT LINES
 lines = {
@@ -227,6 +349,32 @@ def mouse_tracker(event, x, y, flags, param):
 
         cursor_court_pos = (mapped[0][0][0], mapped[0][0][1])
 
+def log_event(event_type, player_id, frame_idx):
+    EVENT_LOG.append({
+        "frame": frame_idx,
+        "player": player_id,
+        "type": event_type,
+        "investigation_until": frame_idx + INTERACTION_WINDOW
+    })
+
+# ======================================================
+# RULE / INTERACTION ENGINE STATE
+# ======================================================
+
+EVENT_LOG = []
+touch_confirmed = False
+
+INTERACTION_WINDOW = 20  # frames for future investigation
+INTERACTION_COUNT=0
+
+MIDDLE_Y = 0.0
+BAULK_Y = 3.75
+BONUS_Y = 4.75
+END_LINE_Y = 6.5
+
+LINE_MARGIN = 0.25
+LOBBY_LEFT = 0.75
+LOBBY_RIGHT = 9.25
 
 while vs.running():
     frame = vs.read()
@@ -236,6 +384,7 @@ while vs.running():
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     vis = frame.copy()
     mat = mat_base.copy()
+    
 
     if cursor_court_pos is not None:
         cx, cy = cursor_court_pos
@@ -374,6 +523,8 @@ while vs.running():
 
             cv2.rectangle(mat, (mx-20, my-20), (mx+20, my+20), (0, 0, 0), 1)
             cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        else:
+            data["display_pos"]=None
 
         
 
@@ -443,7 +594,7 @@ while vs.running():
                 # ELIMINATE PLAYERS MOSTLY BEHIND BONUS LINE
                 # -------------------------------------------------
 
-                BONUS_Y = 2.75  # already defined court bonus line depth
+                #BONUS_Y = 2.75  # already defined court bonus line depth
 
                 behind_bonus_frames = 0
 
@@ -452,8 +603,15 @@ while vs.running():
 
                 # If player’s minimum depth is always high,
                 # it means he never came forward (strong defender signal)
-                if rec["min_y"] > BONUS_Y:
+                if rec["min_y"] > BAULK_Y-1:
                     continue
+
+                avg_vy = np.mean(rec["vy_list"]) if rec["vy_list"] else 0
+                if abs(avg_vy) < 0.05: # Threshold for 'stationary'
+                    continue
+
+                # ADDITIONAL SAFETY: Eliminate players who appeared deep in the court (close to the end line) early on.
+                
 
                 # Strong elimination rule:
                 # If most observed frames are behind bonus, remove
@@ -534,73 +692,152 @@ while vs.running():
             if best_id is not None:
                 RAIDER_ID = best_id
                 RAID_ASSIGNMENT_DONE = True
-                print(f"🔥 RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
+                print(f"RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
 
     # ======================================================
-    # MODULE-2: INTERACTION PROPOSAL LAYER
+    # MODULE-2: INTERACTION LOGIC & PROPOSAL LAYER
     # ======================================================
-
-    active_players = []
+   
+    
+    # NEW: Define player_states for existing features and HHI/HLI encoding
     player_states = {}
+    active_players = [pid for pid, d in GALLERY.items() if d["age"] == 0 and d["display_pos"] is not None]
+    
+    for pid in active_players:
+        state = GALLERY[pid]["kf"].statePost.flatten()
+        player_states[pid] = {
+            "pos": GALLERY[pid]["display_pos"],
+            "vel": (state[2], state[3]),
+            "feat": GALLERY[pid]["feat"]
+        }
+    
+    interaction_candidates = [] # For your existing line-drawing feature
 
-    for pid, data in GALLERY.items():
-        if data["age"] == 0 and data["display_pos"] is not None:
-            active_players.append(pid)
-            state = data["kf"].statePost.flatten()
-            player_states[pid] = {
-                "pos": data["display_pos"],          # (cx, cy) in meters
-                "vel": (state[2], state[3])         # (vx, vy) in pixels/frame
-            }
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID in GALLERY:
+        r_data = GALLERY[RAIDER_ID]
+        if r_data["display_pos"]:
+            r_pos = r_data["display_pos"]
+            r_vel = (r_data["kf"].statePost[2][0], r_data["kf"].statePost[3][0])
 
-    interaction_candidates = []
+            # B. Generate Human-Human (HHI) Proposals
+            for pid in active_players:
+                if pid == RAIDER_ID: continue
+                
+                d_pos = player_states[pid]["pos"]
+                d_vel = player_states[pid]["vel"]
+                d_feat = player_states[pid]["feat"]
+                
+                dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
+                
+                # Geometric Gating: Propose within 1.5m
+                if dist < 1.5:
+                    proposal_engine.encode_hhi(frame_idx,RAIDER_ID, pid, r_pos, d_pos, r_vel, d_vel, r_data["feat"], d_feat)
+                    
+                    # Populate candidates for your existing line drawing feature
+                    interaction_candidates.append({"pair": (RAIDER_ID, pid), "distance": dist})
+                    
+                    if not touch_confirmed and dist < 1.0:
+                        touch_confirmed = True
+                        log_event("RAIDER_DEFENDER_CONTACT", RAIDER_ID, frame_idx)
 
-    DIST_THRESH = 1.0  # meters
+            # C. Generate Human-Line (HLI) Proposals
+            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BONUS", r_pos, BONUS_Y)
+            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BAULK", r_pos, BAULK_Y)
+            
+            for pid, pdata in GALLERY.items():
+                if pdata["display_pos"]:
+                    proposal_engine.encode_hli(frame_idx,pid, "END_LINE", pdata["display_pos"], END_LINE_Y)
 
-    if RAIDER_ID is not None and RAID_ASSIGNMENT_DONE:
+    # ------------------------------------------------------
+    # DEFENDER TOUCHING END LINE
+    # ------------------------------------------------------
 
-        if RAIDER_ID in player_states:
+    for pid, pdata in player_states.items():
 
-            xi, yi = player_states[RAIDER_ID]["pos"]
-            vxi, vyi = player_states[RAIDER_ID]["vel"]
+        if RAIDER_ID is not None and pid != RAIDER_ID:
 
-            for pid, pdata in player_states.items():
+            px, py = pdata["pos"]
 
-                if pid == RAIDER_ID:
-                    continue
+            if abs(py - END_LINE_Y) < LINE_MARGIN:
+                log_event("DEFENDER_ENDLINE_TOUCH", pid, frame_idx)
 
-                xj, yj = pdata["pos"]
-                vxj, vyj = pdata["vel"]
+    # ------------------------------------------------------
+    # RAIDER TOUCHING BONUS / BAULK
+    # ------------------------------------------------------
 
-                d = np.sqrt((xi - xj)**2 + (yi - yj)**2)
-                v_rel = np.sqrt((vxi - vxj)**2 + (vyi - vyj)**2)
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID in player_states:
 
-                if d < DIST_THRESH:
-                    interaction_candidates.append({
-                        "pair": (RAIDER_ID, pid),
-                        "distance": d,
-                        "v_rel": v_rel
-                    })
+        rx, ry = player_states[RAIDER_ID]["pos"]
+
+        if abs(ry - BONUS_Y) < LINE_MARGIN:
+            log_event("RAIDER_BONUS_TOUCH", RAIDER_ID, frame_idx)
+
+        if abs(ry - BAULK_Y) < LINE_MARGIN:
+            log_event("RAIDER_BAULK_TOUCH", RAIDER_ID, frame_idx)
+    
+    # ------------------------------------------------------
+    # LOBBY ENTRY RESTRICTION (BEFORE TOUCH)
+    # ------------------------------------------------------
+
+    for pid, pdata in player_states.items():
+
+        px, py = pdata["pos"]
+
+        if not touch_confirmed:
+
+            if px < LOBBY_LEFT or px > LOBBY_RIGHT:
+                log_event("ILLEGAL_LOBBY_ENTRY_BEFORE_TOUCH", pid, frame_idx)
+    
+    # ------------------------------------------------------
+    # RAIDER RETURN TO MIDDLE (AFTER TOUCH)
+    # ------------------------------------------------------
+
+    if touch_confirmed and RAIDER_ID in player_states:
+
+        rx, ry = player_states[RAIDER_ID]["pos"]
+
+        if ry < 0.8:
+            log_event("RAIDER_RETURNED_MIDDLE", RAIDER_ID, frame_idx)
+
+    # ------------------------------------------------------
+    # EVENT WINDOW CLEANUP / FUTURE INVESTIGATION
+    # ------------------------------------------------------
+
+    for event in EVENT_LOG:
+        if frame_idx <= event["investigation_until"]:
+            # This event is still active for analysis
+            pass
 
 
     # Optional Debug Visualization
     for cand in interaction_candidates:
-        p1 = cand["pair"][0]
-        p2 = cand["pair"][1]
+        p1, p2 = cand["pair"]
 
-        mx1, my1 = court_to_pixel(*player_states[p1]["pos"])
-        mx2, my2 = court_to_pixel(*player_states[p2]["pos"])
+        # SAFETY CHECK: Only draw if both players are currently "Active"
+        if p1 in player_states and p2 in player_states:
+            mx1, my1 = court_to_pixel(*player_states[p1]["pos"])
+            mx2, my2 = court_to_pixel(*player_states[p2]["pos"])
 
-        cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
+            cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
 
     prev_gray = gray.copy()
 
     # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
     # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
-    if frame_idx % 30 == 0:
-        print(f"\n" + "█"*70)
-        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL MEMORY ENTRIES: {len(GALLERY)}")
-        print("█"*70)
+     
+    
         
+    proposal_engine.finalize_frame_proposals()
+    
+    if frame_idx % 30 == 0:
+        print(f"\n" + "█"*80)
+        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL INTERACTION PROPOSALS: {len(proposal_engine.candidate_proposals)}")
+        print("█"*80)
+        
+       
+
+        # 3. Existing Gallery Debug (Condensed)
+        print(f"\n [GALLERY] ACTIVE TRACKS: {len(GALLERY)}")
         for pid, data in GALLERY.items():
             # 1. Physics & State
             state = data["kf"].statePost.flatten() # [x, y, vx, vy]
@@ -622,11 +859,65 @@ while vs.running():
             print(f" ├─ CAMERA:  Optical Flow: {len(data['flow_pts']) if data['flow_pts'] is not None else 0} tracking points")
             print(f" └─ VISUAL:  BBox Height: {h}px | BBox Width: {w}px")
             print("-" * 70)
+
+        # 1. Print Human-Human Interaction (HHI) Triplets
+        # ======================================================
+        # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
+        # ======================================================
+    
+        # 1. Print Human-Human Interaction (HHI) Triplets
+        hhi_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HHI"]
+        if hhi_proposals:
+            print(f" [HHI] PLAYER-TO-PLAYER TRIPLETS:")
+            for p in hhi_proposals:
+                # Replace IDs with "RAIDER" if they match
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                obj_label = "RAIDER" if p['O'] == RAIDER_ID else f"ID_{p['O']}"
+
+                INTERACTION_COUNT+=1
+                
+                # Format: [Frame] <Subject, Interaction, Object>
+                triplet = f"<{sub_label}, {p['I']}, {obj_label}>"
+                # Change this line inside your HHI loop:
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Rel_Vel: {p['features']['rel_vel']:.2f} | Dist: {p['features']['dist']:.2f}m")
+
+        # 2. Print Human-Line Interaction (HLI) Triplets
+        hli_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HLI" and p["features"]["dist"] < 0.5]
+        if hli_proposals:
+            print(f"\n [HLI] PLAYER-TO-LINE TRIPLETS (Active Proximity):")
+            for p in hli_proposals:
+                # Replace Subject ID with "RAIDER" if it matches
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                INTERACTION_COUNT+=1
+                # Format: [Frame] <Subject, Interaction, Object>
+                triplet = f"<{sub_label}, {p['I']}, {p['O']}>"
+                status = "[TOUCHING]" if p["features"]["active"] else "[NEAR]"
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
+
+
+        if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+            # Build the Graph and Encode Features
+            scene_graph = graph_engine.build_graph(
+                proposal_engine.candidate_proposals, 
+                GALLERY, 
+                RAIDER_ID
+            )
+            
+            print(f"\n [GRAPH] DYNAMIC INTERACTION GRAPH CONSTRUCTED")
+            print(f"  ├─ Active Nodes: {graph_engine.active_nodes}")
+            print(f"  └─ Perspective Adjacency Matrix (Top 2x2 Sample):")
+
+            if graph_engine.adjacency_matrix.size > 0:
+                print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
+
+        proposal_engine.reset_proposals()
   
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
+
+   
     
     if out is not None:
         out.write(combined_frame)
@@ -635,7 +926,7 @@ while vs.running():
     
     if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'): break
 
-
-if 'out' in locals():
+print("Total number of Interactions: ", INTERACTION_COUNT)
+if out is not None:
     out.release()
 cv2.destroyAllWindows()

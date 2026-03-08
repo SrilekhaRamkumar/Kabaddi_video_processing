@@ -9,8 +9,9 @@ import time
 import torch
 import os
 import hashlib
+from action_recognition import ActionRecognitionEngine
 
-#COMMIT CHECK
+#COMMIT CHECK 5/3
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
@@ -47,33 +48,159 @@ class VideoStream:
         return not self.stopped or not self.queue.empty()
     
 class InteractionProposalEngine:
-    """Encodes atomic actions into <S, I, O> triplets for the AFGN module."""
+    """Encodes atomic actions into <S, I, O> triplets with strict per-frame uniqueness."""
     def __init__(self):
         self.candidate_proposals = []
+        self._frame_cache = {} # Key: (frame, type, S, O) -> value: proposal_dict
 
     def reset_proposals(self):
+        """Clears accumulated triplets for the 30-frame reasoning window."""
         self.candidate_proposals = []
+        self._frame_cache = {}
 
-    def encode_hhi(self, raider_id, defender_id, r_pos, d_pos, r_vel, d_vel, r_feat, d_feat):
-        """Human-Human Interaction Proposal (Raider vs Defender)."""
-        dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
-        spatial_mask = [d_pos[0]-r_pos[0], d_pos[1]-r_pos[1]] # Relative vector
+    def _add_unique_proposal(self, frame_idx, proposal):
+        """Maintains only the highest-confidence (closest) triplet per frame."""
+        # Create a unique key for this specific interaction event
+        key = (frame_idx, proposal["type"], proposal["S"], proposal["O"])
         
-        self.candidate_proposals.append({
+        if key not in self._frame_cache:
+            # First time seeing this interaction in this frame
+            self._frame_cache[key] = proposal
+        else:
+            # If it already exists, only update if the new one is 'closer' (higher contact chance)
+            if proposal["features"]["dist"] < self._frame_cache[key]["features"]["dist"]:
+                self._frame_cache[key] = proposal
+
+    def finalize_frame_proposals(self):
+        """Converts the unique frame cache into the main proposal list for the Graph Engine."""
+        # This is called once per frame after all detections are processed
+        for proposal in self._frame_cache.values():
+            self.candidate_proposals.append(proposal)
+        # Clear cache for the next frame while keeping the candidate_proposals history
+        self._frame_cache = {}
+
+    def encode_hhi(self, frame_idx, raider_id, defender_id, r_pos, d_pos, r_vel, d_vel, r_feat, d_feat):
+        dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
+        proposal = {
+            "frame": frame_idx,
             "type": "HHI",
             "S": raider_id, "O": defender_id, "I": "POTENTIAL_CONTACT",
-            "features": {"dist": dist, "rel_vel": np.linalg.norm(np.array(r_vel)-np.array(d_vel)),
-                         "mask": spatial_mask, "emb": (0.5*r_feat + 0.5*d_feat).tolist()}
-        })
+            "features": {
+                "dist": dist, 
+                "rel_vel": np.linalg.norm(np.array(r_vel)-np.array(d_vel)),
+                "mask": [d_pos[0]-r_pos[0], d_pos[1]-r_pos[1]], 
+                "emb": (0.5*r_feat + 0.5*d_feat).tolist()
+            }
+        }
+        self._add_unique_proposal(frame_idx, proposal)
 
-    def encode_hli(self, player_id, line_name, p_pos, line_y):
-        """Human-Line Interaction Proposal (Player vs Court Line)."""
+    def encode_hli(self, frame_idx, player_id, line_name, p_pos, line_y):
         dist_to_line = abs(p_pos[1] - line_y)
-        self.candidate_proposals.append({
+        proposal = {
+            "frame": frame_idx,
             "type": "HLI",
             "S": player_id, "O": line_name, "I": "LINE_PROXIMITY",
             "features": {"dist": dist_to_line, "active": dist_to_line < 0.25}
-        })
+        }
+        self._add_unique_proposal(frame_idx, proposal)
+
+class ActiveFactorGraphNetwork:
+    """Constructs a structured graph from triplets using AFGN and Lee et al. methods, extended with factor nodes for third-order interactions."""
+    def __init__(self, top_k=4):
+        self.top_k = top_k
+        self.active_nodes = []
+        self.adjacency_matrix = None
+        self.factor_nodes = []  # For third-order interactions
+
+    def build_graph(self, proposals, gallery, raider_id):
+        # 1. AFGN: Calculate Influence Weights for Active Selection
+        # Initialize only for players currently in the gallery
+        influence = {pid: 0.0 for pid in gallery if gallery[pid]["age"] == 0}
+        
+        for p in proposals:
+            if p["type"] == "HHI":
+                # Enhanced influence weighting: distance, relative velocity, and feature similarity
+                dist_weight = 1.0 / (p["features"]["dist"] + 1e-6)
+                vel_weight = p["features"]["rel_vel"]
+                # Feature similarity using dot product of embedding halves (simplified)
+                emb = np.array(p["features"]["emb"])
+                half = len(emb) // 2
+                feat_sim = np.dot(emb[:half], emb[half:]) / (np.linalg.norm(emb[:half]) * np.linalg.norm(emb[half:]) + 1e-6)
+                weight = dist_weight * vel_weight * feat_sim
+                
+                # SAFETY CHECK: Only update influence if the player is still 'Active'
+                if p["S"] in influence:
+                    influence[p["S"]] += weight
+                if p["O"] in influence:
+                    influence[p["O"]] += weight
+                    
+        # 2. AFGN: Top-k Pruning (Ensures Raider is always included)
+        sorted_ids = sorted(influence.keys(), key=lambda x: influence[x], reverse=True)
+        self.active_nodes = [pid for pid in sorted_ids if pid != raider_id][:self.top_k - 1]
+        self.active_nodes.append(raider_id) # The 'Subject' is always active
+
+        # 3. Lee et al: Construct Adjacency Matrix using Diagonal Ratios
+        n = len(self.active_nodes)
+        self.adjacency_matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(n):
+                if i == j: continue
+                id_i, id_j = self.active_nodes[i], self.active_nodes[j]
+                
+                # Get Bounding Box Diagonals for perspective correction
+                bb_i, bb_j = gallery[id_i]["last_bbox"], gallery[id_j]["last_bbox"]
+                d_i = np.sqrt((bb_i[2]-bb_i[0])**2 + (bb_i[3]-bb_i[1])**2)
+                d_j = np.sqrt((bb_j[2]-bb_j[0])**2 + (bb_j[3]-bb_j[1])**2)
+                
+                # Diagonal Ratio Formula: min(di, dj) / max(di, dj)
+                r_ij = min(d_i, d_j) / max(d_i, d_j)
+                self.adjacency_matrix[i, j] = r_ij
+
+        # 4. AFGN: Factor Node Construction for Third-Order Interactions
+        self.factor_nodes = []
+        from itertools import combinations
+        for triplet in combinations(self.active_nodes, 3):  # Third-order triplets
+            pid1, pid2, pid3 = triplet
+            # Skip if any player doesn't have a valid court position
+            if any(gallery[pid]["display_pos"] is None for pid in triplet):
+                continue
+            # Extract features for the triplet
+            feat1 = np.array(gallery[pid1]["feat"])
+            feat2 = np.array(gallery[pid2]["feat"])
+            feat3 = np.array(gallery[pid3]["feat"])
+            pos1 = np.array(gallery[pid1]["display_pos"])
+            pos2 = np.array(gallery[pid2]["display_pos"])
+            pos3 = np.array(gallery[pid3]["display_pos"])
+            dist12 = np.linalg.norm(pos1 - pos2)
+            dist13 = np.linalg.norm(pos1 - pos3)
+            dist23 = np.linalg.norm(pos2 - pos3)
+            # Aggregate embeddings and distances
+            factor_feat = {
+                "triplet": triplet,
+                "features": {
+                    "distances": [dist12, dist13, dist23],
+                    "embeddings": np.mean([feat1, feat2, feat3], axis=0).tolist()
+                }
+            }
+            self.factor_nodes.append(factor_feat)
+
+        return self.package_features(gallery)
+
+    def package_features(self, gallery):
+        """Encodes Spatiotemporal features for the Factor Graph."""
+        graph_data = {"nodes": [], "edges": self.adjacency_matrix.tolist(), "factor_nodes": self.factor_nodes}
+        for pid in self.active_nodes:
+            state = gallery[pid]["kf"].statePost.flatten()
+            node_feat = {
+                "id": pid,
+                "role": "RAIDER" if pid == RAIDER_ID else "DEFENDER",
+                "motion": [float(state[2]), float(state[3])], # Velocity (vx, vy)
+                "visual": gallery[pid]["feat"].tolist(),     # HSV Embedding
+                "spatial": gallery[pid]["display_pos"]        # Normalized Mat (x, y)
+            }
+            graph_data["nodes"].append(node_feat)
+        return graph_data
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -89,6 +216,8 @@ MODEL1 = "yolov8n.pt"
 cursor_court_pos = None
 LINE_MARGIN = 0.6 
 proposal_engine = InteractionProposalEngine()
+graph_engine = ActiveFactorGraphNetwork(top_k=4)
+action_engine = ActionRecognitionEngine()
 
 # IMAGE-SPACE COURT LINES
 lines = {
@@ -266,14 +395,14 @@ def log_event(event_type, player_id, frame_idx):
     })
 
 # ======================================================
-# RULE / INTERACTION ENGINE STATE
+# PHASE 2: ACTION RECOGNITION & SCORING
 # ======================================================
 
+# Event and interaction tracking (restored)
 EVENT_LOG = []
 touch_confirmed = False
-
 INTERACTION_WINDOW = 20  # frames for future investigation
-INTERACTION_COUNT=0
+INTERACTION_COUNT = 0
 
 MIDDLE_Y = 0.0
 BAULK_Y = 3.75
@@ -284,10 +413,19 @@ LINE_MARGIN = 0.25
 LOBBY_LEFT = 0.75
 LOBBY_RIGHT = 9.25
 
+paused = False
+last_vis = None
+last_mat = None
+
 while vs.running():
-    frame = vs.read()
-    if frame is None: continue
-    frame_idx += 1
+    global TOTAL_POINTS, CURRENT_RAID_POINTS
+    if 'TOTAL_POINTS' not in globals():
+        TOTAL_POINTS = 0
+        CURRENT_RAID_POINTS = 0
+    if not paused:
+        frame = vs.read()
+        if frame is None: continue
+        frame_idx += 1
     
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     vis = frame.copy()
@@ -304,9 +442,9 @@ while vs.running():
             cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1)
             cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
 
-
-    for (p1, p2) in lines.values():
-        cv2.line(vis, p1, p2, (255, 0, 0), 2)
+    # Display current scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
     # 1. OPTICAL FLOW MOTION COMPENSATION
     if prev_gray is not None:
@@ -605,7 +743,7 @@ while vs.running():
     # ======================================================
     # MODULE-2: INTERACTION LOGIC & PROPOSAL LAYER
     # ======================================================
-    proposal_engine.reset_proposals()
+   
     
     # NEW: Define player_states for existing features and HHI/HLI encoding
     player_states = {}
@@ -639,7 +777,7 @@ while vs.running():
                 
                 # Geometric Gating: Propose within 1.5m
                 if dist < 1.5:
-                    proposal_engine.encode_hhi(RAIDER_ID, pid, r_pos, d_pos, r_vel, d_vel, r_data["feat"], d_feat)
+                    proposal_engine.encode_hhi(frame_idx,RAIDER_ID, pid, r_pos, d_pos, r_vel, d_vel, r_data["feat"], d_feat)
                     
                     # Populate candidates for your existing line drawing feature
                     interaction_candidates.append({"pair": (RAIDER_ID, pid), "distance": dist})
@@ -649,12 +787,12 @@ while vs.running():
                         log_event("RAIDER_DEFENDER_CONTACT", RAIDER_ID, frame_idx)
 
             # C. Generate Human-Line (HLI) Proposals
-            proposal_engine.encode_hli(RAIDER_ID, "BONUS", r_pos, BONUS_Y)
-            proposal_engine.encode_hli(RAIDER_ID, "BAULK", r_pos, BAULK_Y)
+            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BONUS", r_pos, BONUS_Y)
+            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BAULK", r_pos, BAULK_Y)
             
             for pid, pdata in GALLERY.items():
                 if pdata["display_pos"]:
-                    proposal_engine.encode_hli(pid, "END_LINE", pdata["display_pos"], END_LINE_Y)
+                    proposal_engine.encode_hli(frame_idx,pid, "END_LINE", pdata["display_pos"], END_LINE_Y)
 
     # ------------------------------------------------------
     # DEFENDER TOUCHING END LINE
@@ -732,47 +870,11 @@ while vs.running():
 
     # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
     # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
-
-    # ======================================================
-    # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
-    # ======================================================
-
-     # 1. Print Human-Human Interaction (HHI) Triplets
-    # ======================================================
-    # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
-    # ======================================================
-  
-    # 1. Print Human-Human Interaction (HHI) Triplets
-    hhi_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HHI"]
-    if hhi_proposals:
-        print(f" [HHI] PLAYER-TO-PLAYER TRIPLETS:")
-        for p in hhi_proposals:
-            # Replace IDs with "RAIDER" if they match
-            sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
-            obj_label = "RAIDER" if p['O'] == RAIDER_ID else f"ID_{p['O']}"
-
-            INTERACTION_COUNT+=1
-            
-            # Format: [Frame] <Subject, Interaction, Object>
-            triplet = f"<{sub_label}, {p['I']}, {obj_label}>"
-            print(f"  ├─ Frame {frame_idx:05d} | {triplet:30} | Rel_Vel: {p['features']['rel_vel']:.2f} | Dist: {p['features']['dist']:.2f}m")
-
-    # 2. Print Human-Line Interaction (HLI) Triplets
-    hli_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HLI" and p["features"]["dist"] < 0.5]
-    if hli_proposals:
-        print(f"\n [HLI] PLAYER-TO-LINE TRIPLETS (Active Proximity):")
-        for p in hli_proposals:
-            # Replace Subject ID with "RAIDER" if it matches
-            sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
-            INTERACTION_COUNT+=1
-            # Format: [Frame] <Subject, Interaction, Object>
-            triplet = f"<{sub_label}, {p['I']}, {p['O']}>"
-            status = "[TOUCHING]" if p["features"]["active"] else "[NEAR]"
-            print(f"  ├─ Frame {frame_idx:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
-
+     
     
         
-
+    proposal_engine.finalize_frame_proposals()
+    
     if frame_idx % 30 == 0:
         print(f"\n" + "█"*80)
         print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL INTERACTION PROPOSALS: {len(proposal_engine.candidate_proposals)}")
@@ -803,18 +905,112 @@ while vs.running():
             print(f" ├─ CAMERA:  Optical Flow: {len(data['flow_pts']) if data['flow_pts'] is not None else 0} tracking points")
             print(f" └─ VISUAL:  BBox Height: {h}px | BBox Width: {w}px")
             print("-" * 70)
+
+        # 1. Print Human-Human Interaction (HHI) Triplets
+        # ======================================================
+        # FORMAL INTERACTION TRIPLET PRINTING <S, I, O>
+        # ======================================================
+    
+        # 1. Print Human-Human Interaction (HHI) Triplets
+        hhi_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HHI"]
+        if hhi_proposals:
+            print(f" [HHI] PLAYER-TO-PLAYER TRIPLETS:")
+            for p in hhi_proposals:
+                # Replace IDs with "RAIDER" if they match
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                obj_label = "RAIDER" if p['O'] == RAIDER_ID else f"ID_{p['O']}"
+
+                INTERACTION_COUNT+=1
+                
+                # Format: [Frame] <Subject, Interaction, Object>
+                triplet = f"<{sub_label}, {p['I']}, {obj_label}>"
+                # Change this line inside your HHI loop:
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Rel_Vel: {p['features']['rel_vel']:.2f} | Dist: {p['features']['dist']:.2f}m")
+
+        # 2. Print Human-Line Interaction (HLI) Triplets
+        hli_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HLI" and p["features"]["dist"] < 0.5]
+        if hli_proposals:
+            print(f"\n [HLI] PLAYER-TO-LINE TRIPLETS (Active Proximity):")
+            for p in hli_proposals:
+                # Replace Subject ID with "RAIDER" if it matches
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                INTERACTION_COUNT+=1
+                # Format: [Frame] <Subject, Interaction, Object>
+                triplet = f"<{sub_label}, {p['I']}, {p['O']}>"
+                status = "[TOUCHING]" if p["features"]["active"] else "[NEAR]"
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
+
+
+        if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+            # Build the Graph and Encode Features
+            scene_graph = graph_engine.build_graph(
+                proposal_engine.candidate_proposals, 
+                GALLERY, 
+                RAIDER_ID
+            )
+            
+            print(f"\n [GRAPH] DYNAMIC INTERACTION GRAPH CONSTRUCTED")
+            print(f"  ├─ Active Nodes: {graph_engine.active_nodes}")
+            print(f"  └─ Perspective Adjacency Matrix (Top 2x2 Sample):")
+
+            if graph_engine.adjacency_matrix.size > 0:
+                print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
+
+            # PHASE 2: Action Recognition and Point Calculation
+            action_results = action_engine.process_frame_actions(
+                scene_graph, 
+                proposal_engine.candidate_proposals, 
+                RAIDER_ID, 
+                frame_idx
+            )
+            
+            # Update global scores
+            TOTAL_POINTS = action_results['total_points']
+            CURRENT_RAID_POINTS += action_results['points_scored']
+            
+            if action_results.get('raid_ended', False):
+                CURRENT_RAID_POINTS = 0  # Reset for new raid
+            
+            print(f"\n [ACTIONS] RECOGNIZED ACTIONS THIS FRAME:")
+            for action in action_results["actions"]:
+                conf = action.get("confidence", 0)
+                print(f"  ├─ {action['type']}: {action['description']} | Points: {action.get('points', 0)} | Conf: {conf:.2f}")
+            print(f"  └─ Frame Points: {action_results['points_scored']} | Total Points: {action_results['total_points']}")
+            if action_results.get('confidence_scores'):
+                avg_conf = np.mean(action_results['confidence_scores']) if action_results['confidence_scores'] else 0
+                print(f"     Average Confidence: {avg_conf:.2f}")
+
+            # Display accuracy metrics every 100 frames
+            if frame_idx % 100 == 0 and 'accuracy_metrics' in action_results:
+                metrics = action_results['accuracy_metrics']
+                print(f"\n [ACCURACY] Estimated: {metrics['estimated_accuracy']:.1%} | High Conf: {metrics['high_confidence_rate']:.1%} | Total Actions: {metrics['total_actions']}")
+
+        proposal_engine.reset_proposals()
   
+    # Display current scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    # Add frame ID to video
+    cv2.putText(vis, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
+
+   
     
     if out is not None:
         out.write(combined_frame)
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
     cv2.imshow("Half Court (2D)", mat)
     
-    if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'): break
+    key = cv2.waitKey(0 if paused else FPS_DELAY)
+    if key & 0xFF == ord('q'):
+        break
+    elif key & 0xFF == ord('p'):
+        paused = not paused
 
 print("Total number of Interactions: ", INTERACTION_COUNT)
 if out is not None:

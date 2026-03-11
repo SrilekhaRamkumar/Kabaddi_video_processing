@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""
+Kabaddi Video Processing Script
+Main entry point for processing Kabaddi videos with action recognition.
+"""
+import os
+import sys
+import hashlib
+import cv2
+import numpy as np
+import torch
+from ultralytics import YOLO
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+from kabaddi.core import VideoStream, apply_optical_flow, run_yolo_detection, update_tracks, add_new_tracks, render_gallery
+from kabaddi.interaction import InteractionProposalEngine, ActiveFactorGraphNetwork, build_player_states, process_interactions, TemporalInteractionCandidateManager
+from kabaddi.reasoning import KabaddiAFGNEngine, collect_raider_stats, assign_raider
+from kabaddi.visualization import ConfirmedInteractionReportBuilder
+from kabaddi.utils import (
+    compute_homography, create_court_mat, court_to_pixel,
+    BAULK_LINE_Y, BONUS_LINE_Y, MID_LINE_Y, END_LINE_Y,
+    LOBBY_LEFT_X, LOBBY_RIGHT_X, LINE_MARGIN,
+    COURT_MAT_WIDTH, COURT_MAT_HEIGHT,
+    MAX_TRACK_AGE, RAIDER_ASSIGN_FRAME
+)
+
+
+# ======================================================
+# CONFIGURATION
+# ======================================================
+VIDEO_PATH = "Videos/raid1.mp4"
+DISPLAY_SCALE = 0.5
+FPS_DELAY = 1
+CONF_THRESH = 0.4
+SMOOTH_ALPHA = 0.25
+MAX_PLAYERS = 8
+MODEL_PATH = "yolov8n.pt"
+
+# IMAGE-SPACE COURT LINES (from original video calibration)
+lines = {
+    "baulk": [(606, 483), (1771, 1078)],
+    "bonus": [(745, 471), (1918, 960)],
+    "middle": [(55, 486), (0, 575)],
+    "end_back": [(885, 471), (1918, 763)],
+    "end_left": [(58, 490), (885, 473)],
+    "end_right": [(1833, 1076), (1916, 1041)],
+    "lobby_left": [(45, 525), (921, 493)],
+    "lobby_right": [(690, 1076), (1915, 821)],
+}
+
+# ======================================================
+# INITIALIZATION
+# ======================================================
+
+# Compute homography
+H = compute_homography(lines)
+
+# Create court mat
+mat_base, court_to_pixel_fn = create_court_mat(COURT_MAT_WIDTH, COURT_MAT_HEIGHT)
+
+# Initialize engines
+proposal_engine = InteractionProposalEngine()
+graph_engine = ActiveFactorGraphNetwork(top_k=4)
+action_engine = KabaddiAFGNEngine()
+candidate_manager = TemporalInteractionCandidateManager()
+report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)
+
+# Device setup
+device = "cuda" if torch.cuda.is_available() else "cpu"
+if device == "cpu":
+    MODEL_PATH = "yolov8n.pt"
+print(f"Device used: {device}")
+
+# Load model
+model = YOLO(MODEL_PATH).to(device)
+
+# Initialize video stream
+vs = VideoStream(VIDEO_PATH).start()
+
+# Tracking state
+prev_gray = None
+NEXT_ID = 0
+GALLERY = {}
+frame_idx = 0
+
+# Raider identification state
+RAIDER_ID = None
+RAIDER_STATS = {}
+RAID_ASSIGNMENT_DONE = False
+
+# Event tracking
+EVENT_LOG = []
+CONFIRMED_EVENT_LOG = []
+touch_confirmed = False
+INTERACTION_WINDOW = 20
+INTERACTION_COUNT = 0
+
+# Scoring
+TOTAL_POINTS = 0
+CURRENT_RAID_POINTS = 0
+
+# Mouse tracking
+cursor_court_pos = None
+
+
+def mouse_tracker(event, x, y, flags, param):
+    global cursor_court_pos
+    if event == cv2.EVENT_MOUSEMOVE:
+        orig_x, orig_y = x / DISPLAY_SCALE, y / DISPLAY_SCALE
+        pt = np.array([[[orig_x, orig_y]]], dtype=np.float32)
+        mapped = cv2.perspectiveTransform(pt, H)[0][0]
+        cursor_court_pos = (mapped[0], mapped[1])
+
+
+def log_event(event_type, player_id, frame_idx):
+    EVENT_LOG.append({
+        "frame": frame_idx,
+        "player": player_id,
+        "type": event_type,
+        "investigation_until": frame_idx + INTERACTION_WINDOW
+    })
+
+
+def log_confirmed_event(event):
+    CONFIRMED_EVENT_LOG.append(event)
+
+
+# ======================================================
+# OUTPUT SETUP
+# ======================================================
+path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
+video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
+output_filename = f"Videos/processed_{video_stem}_{path_hash}.mp4"
+report_output_filename = f"Videos/confirmed_report_{video_stem}_{path_hash}.mp4"
+
+vis_w = int(1920 * DISPLAY_SCALE)
+vis_h = int(1080 * DISPLAY_SCALE)
+canvas_w = vis_w + COURT_MAT_WIDTH
+canvas_h = max(vis_h, COURT_MAT_HEIGHT)
+
+if os.path.exists(output_filename):
+    print(f"Playback only: {output_filename} already exists. Skipping recording.")
+    out = None
+else:
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
+    print(f"Recording to: {output_filename}")
+
+# Setup windows
+cv2.namedWindow("Video (Integrated)")
+cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
+cv2.namedWindow("Half Court (2D)")
+
+# Playback control
+paused = False
+
+# ======================================================
+# MAIN PROCESSING LOOP
+# ======================================================
+print("Starting video processing...")
+
+while vs.running():
+    if not paused:
+        frame = vs.read()
+        if frame is None:
+            continue
+        frame_idx += 1
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    vis = frame.copy()
+    mat = mat_base.copy()
+
+    # Draw cursor position on court mat
+    if cursor_court_pos is not None:
+        cx, cy = cursor_court_pos
+        if -1 < cx < 11 and -1 < cy < 7.5:
+            mx, my = court_to_pixel_fn(cx, cy)
+            cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1)
+            cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
+
+    # Display current scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    # 1. OPTICAL FLOW MOTION COMPENSATION
+    if prev_gray is not None:
+        apply_optical_flow(prev_gray, gray, GALLERY)
+
+    # 2. YOLO DETECTION
+    detections = run_yolo_detection(model, frame, device, CONF_THRESH)
+
+    # 3. TRACK PREDICTION & MATCHING
+    matched_tracks, matched_dets = update_tracks(
+        GALLERY,
+        detections,
+        gray,
+        vis,
+        frame_idx,
+        RAID_ASSIGNMENT_DONE,
+        RAIDER_ID,
+    )
+
+    # 4. NEW TRACKS & AGING
+    NEXT_ID = add_new_tracks(GALLERY, detections, matched_dets, NEXT_ID, MAX_PLAYERS)
+
+    # 5. MAT RENDERING & DIRECTION ARROWS
+    render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel_fn, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_TRACK_AGE)
+
+    # ======================================================
+    # RAIDER IDENTIFICATION
+    # ======================================================
+    if not RAID_ASSIGNMENT_DONE and frame_idx < RAIDER_ASSIGN_FRAME:
+        collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_LINE_Y)
+
+    if not RAID_ASSIGNMENT_DONE and frame_idx >= RAIDER_ASSIGN_FRAME:
+        best_id, raid_done, assign_frame = assign_raider(
+            GALLERY,
+            RAIDER_STATS,
+            frame_idx,
+            RAIDER_ASSIGN_FRAME,
+            BAULK_LINE_Y,
+            BONUS_LINE_Y,
+        )
+        if raid_done:
+            RAIDER_ID = best_id
+            RAID_ASSIGNMENT_DONE = True
+            print(f"RAIDER IDENTIFIED: {RAIDER_ID}")
+
+    # ======================================================
+    # INTERACTION LOGIC & PROPOSAL LAYER
+    # ======================================================
+    player_states, active_players = build_player_states(GALLERY)
+    interaction_candidates, touch_confirmed = process_interactions(
+        frame_idx,
+        GALLERY,
+        player_states,
+        active_players,
+        RAIDER_ID,
+        RAID_ASSIGNMENT_DONE,
+        proposal_engine,
+        BONUS_LINE_Y,
+        BAULK_LINE_Y,
+        END_LINE_Y,
+        LINE_MARGIN,
+        LOBBY_LEFT_X,
+        LOBBY_RIGHT_X,
+        touch_confirmed,
+        log_event,
+    )
+
+    # Visualize interaction candidates
+    for cand in interaction_candidates:
+        p1, p2 = cand["pair"]
+        if p1 in player_states and p2 in player_states:
+            mx1, my1 = court_to_pixel_fn(*player_states[p1]["pos"])
+            mx2, my2 = court_to_pixel_fn(*player_states[p2]["pos"])
+            cv2.line(mat, (mx1, my1), (mx2, my2), (0, 0, 255), 2)
+
+    prev_gray = gray.copy()
+
+    # ======================================================
+    # TEMPORAL VALIDATION & GRAPH CONSTRUCTION
+    # ======================================================
+    frame_proposals = proposal_engine.finalize_frame_proposals()
+    scene_graph = None
+    if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+        scene_graph = graph_engine.build_graph(
+            proposal_engine.candidate_proposals,
+            GALLERY,
+            RAIDER_ID
+        )
+
+    confirmed_events = candidate_manager.update(
+        frame_idx,
+        frame_proposals,
+        player_states,
+        RAIDER_ID,
+        scene_graph,
+    )
+
+    for confirmed_event in confirmed_events:
+        log_confirmed_event(confirmed_event)
+
+    # ======================================================
+    # PERIODIC LOGGING
+    # ======================================================
+    if frame_idx % 30 == 0:
+        print(f"\n" + "█"*80)
+        print(f" LOG FOR FRAME {frame_idx:05d} | TOTAL INTERACTION PROPOSALS: {len(proposal_engine.candidate_proposals)}")
+        print("█"*80)
+
+        print(f"\n [GALLERY] ACTIVE TRACKS: {len(GALLERY)}")
+        for pid, data in GALLERY.items():
+            state = data["kf"].statePost.flatten()
+            color_sample = data["feat"][:5]
+            m_pos = data["display_pos"] if data["display_pos"] else (0.0, 0.0)
+            bb = data["last_bbox"]
+            w, h = (bb[2]-bb[0]), (bb[3]-bb[1])
+            x = data['age']
+            print(f"PLAYER ID: {pid:02d} | Status: {'[VISIBLE]' if data['age']==0 else f'[LOST (Age:{x})]'}")
+            print(f" ├─ PHYSICS: Screen_Pos({state[0]:.0f}, {state[1]:.0f}) | Velocity({state[2]:.2f}, {state[3]:.2f})")
+            print(f" ├─ COURT:   Width: {m_pos[0]:.2f}m, Depth: {m_pos[1]:.2f}m")
+            print(f" ├─ COLORS:  First 5 of 512 bins: {color_sample}")
+            print(f" ├─ CAMERA:  Optical Flow: {len(data['flow_pts']) if data['flow_pts'] is not None else 0} tracking points")
+            print(f" └─ VISUAL:  BBox Height: {h}px | BBox Width: {w}px")
+            print("-" * 70)
+
+        # Print HHI triplets
+        hhi_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HHI"]
+        if hhi_proposals:
+            print(f" [HHI] PLAYER-TO-PLAYER TRIPLETS:")
+            for p in hhi_proposals:
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                obj_label = "RAIDER" if p['O'] == RAIDER_ID else f"ID_{p['O']}"
+                INTERACTION_COUNT += 1
+                triplet = f"<{sub_label}, {p['I']}, {obj_label}>"
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Rel_Vel: {p['features']['rel_vel']:.2f} | Dist: {p['features']['dist']:.2f}m")
+
+        # Print HLI triplets
+        hli_proposals = [p for p in proposal_engine.candidate_proposals if p["type"] == "HLI" and p["features"]["dist"] < 0.5]
+        if hli_proposals:
+            print(f"\n [HLI] PLAYER-TO-LINE TRIPLETS (Active Proximity):")
+            for p in hli_proposals:
+                sub_label = "RAIDER" if p['S'] == RAIDER_ID else f"ID_{p['S']}"
+                INTERACTION_COUNT += 1
+                triplet = f"<{sub_label}, {p['I']}, {p['O']}>"
+                status = "[TOUCHING]" if p["features"]["active"] else "[NEAR]"
+                print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
+
+        # Print confirmed events
+        recent_confirmed = [event for event in CONFIRMED_EVENT_LOG if frame_idx - event["frame"] <= 30]
+        if recent_confirmed:
+            print(f"\n [CONFIRMED EVENTS] TEMPORAL WINDOW OUTPUT:")
+            for event in recent_confirmed:
+                review_tag = " | Visual Review Window" if event["requires_visual_confirmation"] else ""
+                print(
+                    f"  ├─ Frame {event['frame']:05d} | {event['type']} "
+                    f"| Window: {event['window_start']:05d}-{event['window_end']:05d} "
+                    f"| Conf: {event['confidence']:.2f}"
+                    f"| Factor: {event.get('factor_confidence', 0):.2f}{review_tag}"
+                )
+
+        # Print graph info
+        if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+            if scene_graph is None:
+                scene_graph = graph_engine.build_graph(
+                    proposal_engine.candidate_proposals,
+                    GALLERY,
+                    RAIDER_ID
+                )
+
+            print(f"\n [GRAPH] DYNAMIC INTERACTION GRAPH CONSTRUCTED")
+            print(f"  ├─ Active Nodes: {graph_engine.active_nodes}")
+            print(f"  └─ Perspective Adjacency Matrix (Top 2x2 Sample):")
+
+            if graph_engine.adjacency_matrix.size > 0:
+                print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
+
+            # ACTION RECOGNITION AND SCORING
+            action_results = action_engine.process_frame_actions(
+                scene_graph,
+                proposal_engine.candidate_proposals,
+                CONFIRMED_EVENT_LOG,
+                RAIDER_ID,
+                frame_idx,
+                GALLERY,
+            )
+
+            # Update global scores
+            total_score = action_results['total_points']
+            TOTAL_POINTS = total_score['attacker'] - total_score['defender']
+            CURRENT_RAID_POINTS += action_results['points_scored']
+
+            if action_results.get('raid_ended', False):
+                CURRENT_RAID_POINTS = 0
+
+            print(f"\n [ACTIONS] RECOGNIZED ACTIONS THIS FRAME:")
+            for action in action_results["actions"]:
+                conf = action.get("confidence", 0)
+                print(f"  ├─ {action['type']}: {action['description']} | Points: {action.get('points', 0)} | Conf: {conf:.2f}")
+            print(f"  └─ Frame Points: {action_results['points_scored']} | Total Points: {action_results['total_points']}")
+            print(
+                f"     Scoreboard A/D: {total_score['attacker']}/{total_score['defender']} "
+                f"| Net: {TOTAL_POINTS}"
+            )
+            if action_results.get('confidence_scores'):
+                avg_conf = np.mean(action_results['confidence_scores']) if action_results['confidence_scores'] else 0
+                print(f"     Average Confidence: {avg_conf:.2f}")
+
+            # Display accuracy metrics every 100 frames
+            if frame_idx % 100 == 0 and 'accuracy_metrics' in action_results:
+                metrics = action_results['accuracy_metrics']
+                print(f"\n [ACCURACY] Estimated: {metrics['estimated_accuracy']:.1%} | High Conf: {metrics['high_confidence_rate']:.1%} | Total Actions: {metrics['total_actions']}")
+
+        proposal_engine.reset_proposals()
+
+    # Update scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    # Add frame ID to video
+    cv2.putText(vis, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+    # Combine video and court mat
+    vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
+    combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
+    combined_frame[:vis_h, :vis_w] = vis_render
+    combined_frame[:COURT_MAT_HEIGHT, vis_w:vis_w+COURT_MAT_WIDTH] = mat
+
+    # Add to report builder
+    report_builder.add_frame(frame_idx, combined_frame)
+    report_builder.capture_events(confirmed_events)
+
+    # Write output
+    if out is not None:
+        out.write(combined_frame)
+
+    # Display
+    cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
+    cv2.imshow("Half Court (2D)", mat)
+
+    # Handle keyboard input
+    key = cv2.waitKey(0 if paused else FPS_DELAY)
+    if key & 0xFF == ord('q'):
+        break
+    elif key & 0xFF == ord('p'):
+        paused = not paused
+
+# ======================================================
+# CLEANUP AND FINALIZATION
+# ======================================================
+print(f"\nTotal number of Interactions: {INTERACTION_COUNT}")
+
+if out is not None:
+    out.release()
+    print(f"Main video saved to: {output_filename}")
+
+if report_builder.has_segments():
+    wrote_report = report_builder.write_video(report_output_filename, 30.0, (canvas_w, canvas_h))
+    if wrote_report:
+        print(f"Confirmed interaction report saved to: {report_output_filename}")
+    else:
+        print("Confirmed interaction report could not be written.")
+else:
+    print("No confirmed interaction windows captured for report video.")
+
+cv2.destroyAllWindows()
+vs.stop()
+print("Processing complete!")
+

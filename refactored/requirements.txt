@@ -1,0 +1,10 @@
+# Core dependencies
+numpy>=1.21.0
+opencv-python>=4.5.0
+torch>=1.9.0
+ultralytics>=8.0.0
+scipy>=1.7.0
+
+# Optional dependencies
+pyyaml>=5.4.0
+

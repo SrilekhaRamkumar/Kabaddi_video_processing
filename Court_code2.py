@@ -2,169 +2,26 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from ultralytics import RTDETR
-from scipy.optimize import linear_sum_assignment
-from threading import Thread
-from queue import Queue
-import time
 import torch
 import os
 import hashlib
+from classifier_bridge import ConfirmedWindowClassifierBridge
+from dataset_exporter import ConfirmedWindowDatasetExporter
+from kabaddi_afgn_reasoning import KabaddiAFGNEngine
+from interaction_graph import InteractionProposalEngine, ActiveFactorGraphNetwork, render_graph_panel
+from interaction_logic import build_player_states, process_interactions
+from raider_logic import collect_raider_stats, assign_raider
+from report_video import ConfirmedInteractionReportBuilder
+from temporal_events import TemporalInteractionCandidateManager
+from tracking_pipeline import apply_optical_flow, run_yolo_detection, update_tracks, add_new_tracks, render_gallery
+from video_stream import VideoStream
 
-#COMMIT CHECK 5/3
+#COMMIT CHECK 12/3
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
 
 VIDEO_PATH = "Videos/raid1.mp4"
-
-class VideoStream:
-    def __init__(self, path, queue_size=5):
-        self.stream = cv2.VideoCapture(path)
-        self.stopped = False
-        self.queue = Queue(maxsize=queue_size)
-        
-    def start(self):
-        t = Thread(target=self.update, args=())
-        t.daemon = True
-        t.start()
-        return self
-
-    def update(self):
-        while not self.stopped:
-            if not self.queue.full():
-                ret, frame = self.stream.read()
-                if not ret:
-                    self.stopped = True
-                    return
-                self.queue.put(frame)
-            else:
-                time.sleep(0.001)
-
-    def read(self):
-        return self.queue.get() if not self.queue.empty() else None
-
-    def running(self):
-        return not self.stopped or not self.queue.empty()
-    
-class InteractionProposalEngine:
-    """Encodes atomic actions into <S, I, O> triplets with strict per-frame uniqueness."""
-    def __init__(self):
-        self.candidate_proposals = []
-        self._frame_cache = {} # Key: (frame, type, S, O) -> value: proposal_dict
-
-    def reset_proposals(self):
-        """Clears accumulated triplets for the 30-frame reasoning window."""
-        self.candidate_proposals = []
-        self._frame_cache = {}
-
-    def _add_unique_proposal(self, frame_idx, proposal):
-        """Maintains only the highest-confidence (closest) triplet per frame."""
-        # Create a unique key for this specific interaction event
-        key = (frame_idx, proposal["type"], proposal["S"], proposal["O"])
-        
-        if key not in self._frame_cache:
-            # First time seeing this interaction in this frame
-            self._frame_cache[key] = proposal
-        else:
-            # If it already exists, only update if the new one is 'closer' (higher contact chance)
-            if proposal["features"]["dist"] < self._frame_cache[key]["features"]["dist"]:
-                self._frame_cache[key] = proposal
-
-    def finalize_frame_proposals(self):
-        """Converts the unique frame cache into the main proposal list for the Graph Engine."""
-        # This is called once per frame after all detections are processed
-        for proposal in self._frame_cache.values():
-            self.candidate_proposals.append(proposal)
-        # Clear cache for the next frame while keeping the candidate_proposals history
-        self._frame_cache = {}
-
-    def encode_hhi(self, frame_idx, raider_id, defender_id, r_pos, d_pos, r_vel, d_vel, r_feat, d_feat):
-        dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
-        proposal = {
-            "frame": frame_idx,
-            "type": "HHI",
-            "S": raider_id, "O": defender_id, "I": "POTENTIAL_CONTACT",
-            "features": {
-                "dist": dist, 
-                "rel_vel": np.linalg.norm(np.array(r_vel)-np.array(d_vel)),
-                "mask": [d_pos[0]-r_pos[0], d_pos[1]-r_pos[1]], 
-                "emb": (0.5*r_feat + 0.5*d_feat).tolist()
-            }
-        }
-        self._add_unique_proposal(frame_idx, proposal)
-
-    def encode_hli(self, frame_idx, player_id, line_name, p_pos, line_y):
-        dist_to_line = abs(p_pos[1] - line_y)
-        proposal = {
-            "frame": frame_idx,
-            "type": "HLI",
-            "S": player_id, "O": line_name, "I": "LINE_PROXIMITY",
-            "features": {"dist": dist_to_line, "active": dist_to_line < 0.25}
-        }
-        self._add_unique_proposal(frame_idx, proposal)
-
-class DynamicInteractionGraph:
-    """Constructs a structured graph from triplets using AFGN and Lee et al. methods."""
-    def __init__(self, top_k=4):
-        self.top_k = top_k
-        self.active_nodes = []
-        self.adjacency_matrix = None
-
-    def build_graph(self, proposals, gallery, raider_id):
-        # 1. AFGN: Calculate Influence Weights for Active Selection
-        # Initialize only for players currently in the gallery
-        influence = {pid: 0.0 for pid in gallery if gallery[pid]["age"] == 0}
-        
-        for p in proposals:
-            if p["type"] == "HHI":
-                # Influence is inversely proportional to distance
-                weight = 1.0 / (p["features"]["dist"] + 1e-6)
-                
-                # SAFETY CHECK: Only update influence if the player is still 'Active'
-                if p["S"] in influence:
-                    influence[p["S"]] += weight
-                if p["O"] in influence:
-                    influence[p["O"]] += weight
-                    
-        # 2. AFGN: Top-k Pruning (Ensures Raider is always included)
-        sorted_ids = sorted(influence.keys(), key=lambda x: influence[x], reverse=True)
-        self.active_nodes = [pid for pid in sorted_ids if pid != raider_id][:self.top_k - 1]
-        self.active_nodes.append(raider_id) # The 'Subject' is always active
-
-        # 3. Lee et al: Construct Adjacency Matrix using Diagonal Ratios
-        n = len(self.active_nodes)
-        self.adjacency_matrix = np.zeros((n, n))
-        
-        for i in range(n):
-            for j in range(n):
-                if i == j: continue
-                id_i, id_j = self.active_nodes[i], self.active_nodes[j]
-                
-                # Get Bounding Box Diagonals for perspective correction
-                bb_i, bb_j = gallery[id_i]["last_bbox"], gallery[id_j]["last_bbox"]
-                d_i = np.sqrt((bb_i[2]-bb_i[0])**2 + (bb_i[3]-bb_i[1])**2)
-                d_j = np.sqrt((bb_j[2]-bb_j[0])**2 + (bb_j[3]-bb_j[1])**2)
-                
-                # Diagonal Ratio Formula: min(di, dj) / max(di, dj)
-                r_ij = min(d_i, d_j) / max(d_i, d_j)
-                self.adjacency_matrix[i, j] = r_ij
-
-        return self.package_features(gallery)
-
-    def package_features(self, gallery):
-        """Encodes Spatiotemporal features for the Factor Graph."""
-        graph_data = {"nodes": [], "edges": self.adjacency_matrix.tolist()}
-        for pid in self.active_nodes:
-            state = gallery[pid]["kf"].statePost.flatten()
-            node_feat = {
-                "id": pid,
-                "role": "RAIDER" if pid == RAIDER_ID else "DEFENDER",
-                "motion": [float(state[2]), float(state[3])], # Velocity (vx, vy)
-                "visual": gallery[pid]["feat"].tolist(),     # HSV Embedding
-                "spatial": gallery[pid]["display_pos"]        # Normalized Mat (x, y)
-            }
-            graph_data["nodes"].append(node_feat)
-        return graph_data
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -180,7 +37,12 @@ MODEL1 = "yolov8n.pt"
 cursor_court_pos = None
 LINE_MARGIN = 0.6 
 proposal_engine = InteractionProposalEngine()
-graph_engine = DynamicInteractionGraph(top_k=4)
+graph_engine = ActiveFactorGraphNetwork(top_k=4)
+action_engine = KabaddiAFGNEngine()
+candidate_manager = TemporalInteractionCandidateManager()
+report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)
+classifier_bridge = ConfirmedWindowClassifierBridge()
+dataset_exporter = ConfirmedWindowDatasetExporter(os.path.join("Videos", "classifier_dataset"), fps=30.0)
 
 # IMAGE-SPACE COURT LINES
 lines = {
@@ -219,6 +81,7 @@ court_pts = np.array([[0, 6.5], [10, 6.5], [0, 0], [10, 0]], dtype=np.float32)
 H, _ = cv2.findHomography(img_pts, court_pts, cv2.RANSAC, 5.0)
 
 COURT_W, COURT_H = 400, 260
+GRAPH_W, GRAPH_H = 420, 320
 mat_base = np.ones((COURT_H, COURT_W, 3), dtype=np.uint8) * 235
 
 def court_to_pixel(x, y):
@@ -233,37 +96,6 @@ for y, name in [(3.75, "baulk"), (4.75, "bonus")]:
     cv2.putText(mat_base, name, (8, court_to_pixel(0, y)[1]-4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)
 for x in [0.75, 9.25]:
     cv2.line(mat_base, court_to_pixel(x, 0), court_to_pixel(x, 6.5), (0, 0, 0), 1)
-
-# ======================================================
-# TRACKING HELPERS
-# ======================================================
-def create_kalman(x, y):
-    kf = cv2.KalmanFilter(4, 2)
-    kf.transitionMatrix = np.array([[1,0,1,0],[0,1,0,1],[0,0,1,0],[0,0,0,1]], np.float32)
-    kf.measurementMatrix = np.array([[1,0,0,0],[0,1,0,0]], np.float32)
-    kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
-    kf.errorCovPost = np.eye(4, dtype=np.float32)
-    kf.statePost = np.array([[x], [y], [0], [0]], np.float32)
-    return kf
-
-def extract_embedding(frame, box):
-    x1, y1, x2, y2 = box
-    crop = frame[max(0,y1):y2, max(0,x1):x2]
-    if crop.size == 0: return None
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
-    cv2.normalize(hist, hist)
-    return hist.flatten()
-
-def cosine(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-6)
-
-def draw_3d_bbox(img, x1, y1, x2, y2, depth=12):
-    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    cv2.rectangle(img, (x1+depth, y1-depth), (x2+depth, y2-depth), (0, 255, 0), 2)
-    for p in [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]:
-        cv2.line(img, p, (p[0]+depth, p[1]-depth), (0, 255, 0), 2)
 
 # ======================================================
 # MAIN LOOP
@@ -289,6 +121,8 @@ frame_idx = 0
 RAIDER_ID = None
 RAIDER_STATS = {}
 RAID_ASSIGNMENT_DONE = False
+RAIDER_EXITED = False
+RAIDER_MISSING_FRAMES = 0
 RAIDER_CONV_ACCUM = {}
 MIN_FRAMES_FOR_DECISION = 40
 
@@ -318,13 +152,15 @@ cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 
 
 path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
-output_filename = f"Videos/processed_{path_hash}.mp4"
+video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
+output_filename = f"Videos/processed_{video_stem}_{path_hash}.mp4"
+report_output_filename = f"Videos/confirmed_report_{video_stem}_{path_hash}.mp4"
 
 
 vis_w = int(1920 * DISPLAY_SCALE)
 vis_h = int(1080 * DISPLAY_SCALE)
-canvas_w = vis_w + COURT_W 
-canvas_h = max(vis_h, COURT_H)
+canvas_w = vis_w + COURT_W + GRAPH_W
+canvas_h = max(vis_h, COURT_H, GRAPH_H)
 
 if os.path.exists(output_filename):
     print(f"Playback only: {output_filename} already exists. Skipping recording.")
@@ -357,15 +193,35 @@ def log_event(event_type, player_id, frame_idx):
         "investigation_until": frame_idx + INTERACTION_WINDOW
     })
 
+
+def log_confirmed_event(event):
+    CONFIRMED_EVENT_LOG.append(event)
+
+
+def apply_classifier_results(confirmed_log, classifier_results):
+    if not classifier_results:
+        return
+    result_map = {result["event_key"]: result for result in classifier_results}
+    for event in confirmed_log:
+        event_key = (event["type"], event["frame"], event["subject"], event["object"])
+        classifier_result = result_map.get(event_key)
+        if classifier_result is None:
+            continue
+        event["classifier_result"] = classifier_result
+        event["classifier_valid_prob"] = classifier_result["probabilities"].get("valid", 0.0)
+        event["classifier_label"] = classifier_result["predicted_label"]
+        event["guaranteed_by_classifier"] = classifier_result["guaranteed"]
+
 # ======================================================
-# RULE / INTERACTION ENGINE STATE
+# PHASE 2: ACTION RECOGNITION & SCORING
 # ======================================================
 
+# Event and interaction tracking (restored)
 EVENT_LOG = []
+CONFIRMED_EVENT_LOG = []
 touch_confirmed = False
-
 INTERACTION_WINDOW = 20  # frames for future investigation
-INTERACTION_COUNT=0
+INTERACTION_COUNT = 0
 
 MIDDLE_Y = 0.0
 BAULK_Y = 3.75
@@ -376,10 +232,19 @@ LINE_MARGIN = 0.25
 LOBBY_LEFT = 0.75
 LOBBY_RIGHT = 9.25
 
+paused = False
+last_vis = None
+last_mat = None
+
 while vs.running():
-    frame = vs.read()
-    if frame is None: continue
-    frame_idx += 1
+    global TOTAL_POINTS, CURRENT_RAID_POINTS
+    if 'TOTAL_POINTS' not in globals():
+        TOTAL_POINTS = 0
+        CURRENT_RAID_POINTS = 0
+    if not paused:
+        frame = vs.read()
+        if frame is None: continue
+        frame_idx += 1
     
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     vis = frame.copy()
@@ -396,135 +261,52 @@ while vs.running():
             cv2.circle(mat, (mx, my), 7, (0, 255, 255), -1)
             cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
 
-
-    for (p1, p2) in lines.values():
-        cv2.line(vis, p1, p2, (255, 0, 0), 2)
+    # Display current scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
     # 1. OPTICAL FLOW MOTION COMPENSATION
     if prev_gray is not None:
-        for pid, data in GALLERY.items():
-            if data["flow_pts"] is not None:
-                new_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, data["flow_pts"], None, winSize=(15, 15), maxLevel=2)
-                if new_pts is not None:
-                    good_new = new_pts[status == 1]
-                    good_old = data["flow_pts"][status == 1]
-                    if len(good_new) > 5:
-                        dx, dy = np.mean(good_new - good_old, axis=0)
-                        data["kf"].statePost[0] += dx
-                        data["kf"].statePost[1] += dy
-                        data["flow_pts"] = good_new.reshape(-1, 1, 2)
+        apply_optical_flow(prev_gray, gray, GALLERY)
 
     # 2. YOLO DETECTION
-    results = model(frame, device=device, verbose=False)[0]
-    detections = []
-    for box in results.boxes:
-        if int(box.cls[0]) != 0 or float(box.conf[0]) < CONF_THRESH: continue
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        emb = extract_embedding(frame, (x1, y1, x2, y2))
-        if emb is not None: detections.append({"bbox": (x1, y1, x2, y2), "foot": ((x1+x2)//2, y2), "emb": emb})
+    detections = run_yolo_detection(model, frame, device, CONF_THRESH)
 
     # 3. TRACK PREDICTION & MATCHING
-    track_ids = list(GALLERY.keys())
-    predictions = [GALLERY[pid]["kf"].predict() for pid in track_ids]
-    
-    matched_tracks, matched_dets = set(), set()
-    if predictions and detections:
-        cost_matrix = np.zeros((len(predictions), len(detections)))
-        for i, pred in enumerate(predictions):
-            px, py = pred[0][0], pred[1][0]
-            for j, det in enumerate(detections):
-                fx, fy = det["foot"]
-                cost_matrix[i, j] = 0.7 * (np.sqrt((px-fx)**2 + (py-fy)**2)/200) + 0.3 * (1 - cosine(det["emb"], GALLERY[track_ids[i]]["feat"]))
-        
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-        for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r, c] < 1.2:
-                pid, det = track_ids[r], detections[c]
-                GALLERY[pid]["kf"].correct(np.array([[np.float32(det["foot"][0])], [np.float32(det["foot"][1])]]))
-                GALLERY[pid]["feat"] = 0.8 * GALLERY[pid]["feat"] + 0.2 * det["emb"]
-                GALLERY[pid]["age"] = 0
-                GALLERY[pid]["last_bbox"] = det["bbox"]
-                
-                # RESTORED: Foot Ellipse and Labels
-                fx, fy = det["foot"]
-                x1, y1, x2, y2 = det["bbox"]
-                draw_3d_bbox(vis, x1, y1, x2, y2)
-                
-                ew, eh = int((x2-x1)*0.7), int((x2-x1)*0.22)
-                cv2.ellipse(vis, ((fx, fy), (ew, eh), 0), (255, 0, 0), 2)
-                cv2.putText(vis, f"ID {pid}", (x1, max(30, y1-12)), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-                if RAID_ASSIGNMENT_DONE and pid == RAIDER_ID:
-                    cv2.putText(
-                        vis,
-                        "RAIDER",
-                        (x1 + 120, max(30, y1 - 12)),  # beside ID text
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.0,
-                        (0, 255, 255),   # yellow for distinction
-                        3
-                    )
-
-
-                cv2.circle(vis, (fx, fy), 5, (255, 0, 0), -1)
-
-                # PERFORMANCE TWEAK: Only refresh flow points periodically
-                if frame_idx % 4 == 0:
-                    pts = cv2.goodFeaturesToTrack(gray[y1:y2, x1:x2], maxCorners=8, qualityLevel=0.3, minDistance=5)
-                    if pts is not None:
-                        pts[:, :, 0] += x1; pts[:, :, 1] += y1
-                        GALLERY[pid]["flow_pts"] = pts
-                
-                matched_tracks.add(pid); matched_dets.add(c)
+    matched_tracks, matched_dets = update_tracks(
+        GALLERY,
+        detections,
+        gray,
+        vis,
+        frame_idx,
+        RAID_ASSIGNMENT_DONE,
+        RAIDER_ID,
+    )
 
     # 4. NEW TRACKS & AGING
-    for j, det in enumerate(detections):
-        if j not in matched_dets and len(GALLERY) < MAX_PLAYERS:
-            GALLERY[NEXT_ID] = {"feat": det["emb"], "kf": create_kalman(*det["foot"]), "age": 0, "display_pos": None, "flow_pts": None, "last_bbox": det["bbox"]}
-            NEXT_ID += 1
+    NEXT_ID = add_new_tracks(GALLERY, detections, matched_dets, NEXT_ID, MAX_PLAYERS)
 
     # 5. MAT RENDERING & DIRECTION ARROWS
-    dead = [pid for pid, d in GALLERY.items() if pid not in matched_tracks and d["age"] > MAX_AGE]
-    for pid in dead: del GALLERY[pid]
-    
-    for pid, data in GALLERY.items():
-        if pid not in matched_tracks: data["age"] += 1
-        
-        pred = data["kf"].statePost
-        px, py, vx, vy = pred[0][0], pred[1][0], pred[2][0], pred[3][0]
-        
-        # RESTORED: Directional Arrows
-        angle = np.degrees(np.arctan2(vy, vx))
-        ex = int(px + 40 * np.cos(np.radians(angle)))
-        ey = int(py + 40 * np.sin(np.radians(angle)))
-        cv2.arrowedLine(vis, (int(px), int(py)), (ex, ey), (0, 255, 255), 2)
+    render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_AGE)
 
-        # Homography Mapping
-        mapped = cv2.perspectiveTransform(np.array([[[px, py]]], dtype=np.float32), H)[0][0]
-        
-
-        cx, cy = mapped
-       
-        if LINE_MARGIN < cx < 10 - LINE_MARGIN and LINE_MARGIN < cy < 6.5 - LINE_MARGIN:
-            if data["display_pos"] is None: data["display_pos"] = (cx, cy)
-            else:
-                ox, oy = data["display_pos"]
-                data["display_pos"] = (ox + SMOOTH_ALPHA*(cx-ox), oy + SMOOTH_ALPHA*(cy-oy))
-            
-            mx, my = court_to_pixel(*data["display_pos"])
-            
-
-            bh = data["last_bbox"][3] - data["last_bbox"][1]
-            scale = np.clip((bh - 80) / 220, 0, 1)
-            dot_rad = int(5 + scale * 8)
-            
-            cv2.circle(mat, (mx, my), dot_rad, (255, 0, 0), -1)
-            if pid == RAIDER_ID:
-                cv2.circle(mat, (mx, my), dot_rad + 6, (0, 0, 255), 3)
-
-            cv2.rectangle(mat, (mx-20, my-20), (mx+20, my+20), (0, 0, 0), 1)
-            cv2.putText(mat, f"{pid}", (mx + 6, my - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID is not None:
+        raider_track = GALLERY.get(RAIDER_ID)
+        raider_missing = (
+            raider_track is None
+            or raider_track.get("age", 0) > 15
+            or (
+                raider_track.get("display_pos") is None
+                and raider_track.get("miss_streak", 0) > 10
+            )
+        )
+        if raider_missing:
+            RAIDER_MISSING_FRAMES += 1
         else:
-            data["display_pos"]=None
+            RAIDER_MISSING_FRAMES = 0
+
+        if RAIDER_MISSING_FRAMES >= 25 and not RAIDER_EXITED:
+            RAIDER_EXITED = True
+            print(f"RAIDER EXIT LOCK ENGAGED at frame {frame_idx} for ID {RAIDER_ID}")
 
         
 
@@ -532,38 +314,8 @@ while vs.running():
     # RAIDER STATS COLLECTION (FIRST PHASE)
     # ======================================================
 
-    if not RAID_ASSIGNMENT_DONE and frame_idx < ASSIGN_FRAME:
-
-        for pid, data in GALLERY.items():
-
-            if data["display_pos"] is None:
-                continue
-
-            cx, cy = data["display_pos"]
-
-            if pid not in RAIDER_STATS:
-                RAIDER_STATS[pid] = {
-                    "first_seen": frame_idx,
-                    "min_y": cy,
-                    "max_y": cy,
-                    "vy_list": [],
-                    "behind_baulk_frames": 0,
-                    "frames": 0
-                }
-
-            rec = RAIDER_STATS[pid]
-
-            rec["min_y"] = min(rec["min_y"], cy)
-            rec["max_y"] = max(rec["max_y"], cy)
-            rec["frames"] += 1
-
-            # Depth-based defender prior
-            if cy > BAULK_Y:
-                rec["behind_baulk_frames"] += 1
-
-            state = data["kf"].statePost.flatten()
-            vy = state[3]
-            rec["vy_list"].append(vy)
+    if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx < ASSIGN_FRAME:
+        collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_Y)
 
 
 
@@ -572,232 +324,44 @@ while vs.running():
     # REVISED RAIDER ASSIGNMENT (Safety-first logic)
     # ======================================================
 
-    if not RAID_ASSIGNMENT_DONE and frame_idx >= ASSIGN_FRAME:
-
-        best_score = -1e9
-        best_id = None
-
-        visible_players = [pid for pid, d in GALLERY.items()
-                        if d["display_pos"] is not None and d["age"] == 0]
-
-        if len(visible_players) < 3:
-            ASSIGN_FRAME += 10
-        else:
-            for pid in visible_players:
-
-                rec = RAIDER_STATS.get(pid, None)
-                if rec is None or rec["frames"] < 20:
-                    continue
-
-
-                # -------------------------------------------------
-                # ELIMINATE PLAYERS MOSTLY BEHIND BONUS LINE
-                # -------------------------------------------------
-
-                #BONUS_Y = 2.75  # already defined court bonus line depth
-
-                behind_bonus_frames = 0
-
-                # Count how many frames player stayed deep behind bonus
-                min_depth = rec["max_y"]
-
-                # If player’s minimum depth is always high,
-                # it means he never came forward (strong defender signal)
-                if rec["min_y"] > BAULK_Y-1:
-                    continue
-
-                avg_vy = np.mean(rec["vy_list"]) if rec["vy_list"] else 0
-                if abs(avg_vy) < 0.05: # Threshold for 'stationary'
-                    continue
-
-                # ADDITIONAL SAFETY: Eliminate players who appeared deep in the court (close to the end line) early on.
-                
-
-                # Strong elimination rule:
-                # If most observed frames are behind bonus, remove
-                deep_ratio = sum(1 for y in [rec["max_y"]] if y > BONUS_Y) / rec["frames"]
-
-                if rec["min_y"] > BONUS_Y - 0.3:
-                    continue
-
-
-                xi, yi = GALLERY[pid]["display_pos"]
-                state_i = GALLERY[pid]["kf"].statePost.flatten()
-                vxi, vyi = state_i[2], state_i[3]
-
-                # -----------------------------
-                # 1. DEPTH DOMINANCE SCORE
-                # -----------------------------
-                depths = [GALLERY[o]["display_pos"][1]
-                        for o in visible_players if o != pid]
-
-                if len(depths) == 0:
-                    continue
-
-                depth_rank = sum(yi > d for d in depths)
-
-                # -----------------------------
-                # 2. CONVERGENCE SCORE
-                # -----------------------------
-                convergence_count = 0
-                close_players = 0
-
-                for other in visible_players:
-                    if other == pid:
-                        continue
-
-                    xj, yj = GALLERY[other]["display_pos"]
-                    state_j = GALLERY[other]["kf"].statePost.flatten()
-                    vxj, vyj = state_j[2], state_j[3]
-
-                    dx = xi - xj
-                    dy = yi - yj
-                    dist = np.sqrt(dx*dx + dy*dy) + 1e-6
-
-                    if dist < 2.5:
-                        close_players += 1
-
-                    dir_vec = np.array([dx/dist, dy/dist])
-                    vel_vec = np.array([vxj, vyj])
-
-                    if np.dot(vel_vec, dir_vec) > 0:
-                        convergence_count += 1
-
-                # -----------------------------
-                # 3. MOVEMENT UNIQUENESS
-                # Raider usually has higher speed magnitude
-                # -----------------------------
-                speed = np.sqrt(vxi*vxi + vyi*vyi)
-
-                # -----------------------------
-                # 4. ENTRY PRIOR (appeared later boost)
-                # -----------------------------
-                entry_prior = rec["first_seen"] / frame_idx
-
-                # -----------------------------
-                # FINAL SCORE
-                # -----------------------------
-                score = (
-                    depth_rank * 4.0 +
-                    convergence_count * 3.5 +
-                    close_players * 2.0 +
-                    speed * 1.5 +
-                    entry_prior * 5.0
-                )
-
-                if score > best_score:
-                    best_score = score
-                    best_id = pid
-
-            if best_id is not None:
-                RAIDER_ID = best_id
-                RAID_ASSIGNMENT_DONE = True
-                print(f"RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
+    if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx >= ASSIGN_FRAME:
+        best_id, raid_done, ASSIGN_FRAME = assign_raider(
+            GALLERY,
+            RAIDER_STATS,
+            frame_idx,
+            ASSIGN_FRAME,
+            BAULK_Y,
+            BONUS_Y,
+        )
+        if raid_done:
+            RAIDER_ID = best_id
+            RAID_ASSIGNMENT_DONE = True
+            print(f"RAIDER IDENTIFIED (Defense-Half Model): {RAIDER_ID}")
 
     # ======================================================
     # MODULE-2: INTERACTION LOGIC & PROPOSAL LAYER
     # ======================================================
    
     
-    # NEW: Define player_states for existing features and HHI/HLI encoding
-    player_states = {}
-    active_players = [pid for pid, d in GALLERY.items() if d["age"] == 0 and d["display_pos"] is not None]
-    
-    for pid in active_players:
-        state = GALLERY[pid]["kf"].statePost.flatten()
-        player_states[pid] = {
-            "pos": GALLERY[pid]["display_pos"],
-            "vel": (state[2], state[3]),
-            "feat": GALLERY[pid]["feat"]
-        }
-    
-    interaction_candidates = [] # For your existing line-drawing feature
-
-    if RAID_ASSIGNMENT_DONE and RAIDER_ID in GALLERY:
-        r_data = GALLERY[RAIDER_ID]
-        if r_data["display_pos"]:
-            r_pos = r_data["display_pos"]
-            r_vel = (r_data["kf"].statePost[2][0], r_data["kf"].statePost[3][0])
-
-            # B. Generate Human-Human (HHI) Proposals
-            for pid in active_players:
-                if pid == RAIDER_ID: continue
-                
-                d_pos = player_states[pid]["pos"]
-                d_vel = player_states[pid]["vel"]
-                d_feat = player_states[pid]["feat"]
-                
-                dist = np.sqrt((r_pos[0]-d_pos[0])**2 + (r_pos[1]-d_pos[1])**2)
-                
-                # Geometric Gating: Propose within 1.5m
-                if dist < 1.5:
-                    proposal_engine.encode_hhi(frame_idx,RAIDER_ID, pid, r_pos, d_pos, r_vel, d_vel, r_data["feat"], d_feat)
-                    
-                    # Populate candidates for your existing line drawing feature
-                    interaction_candidates.append({"pair": (RAIDER_ID, pid), "distance": dist})
-                    
-                    if not touch_confirmed and dist < 1.0:
-                        touch_confirmed = True
-                        log_event("RAIDER_DEFENDER_CONTACT", RAIDER_ID, frame_idx)
-
-            # C. Generate Human-Line (HLI) Proposals
-            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BONUS", r_pos, BONUS_Y)
-            proposal_engine.encode_hli(frame_idx,RAIDER_ID, "BAULK", r_pos, BAULK_Y)
-            
-            for pid, pdata in GALLERY.items():
-                if pdata["display_pos"]:
-                    proposal_engine.encode_hli(frame_idx,pid, "END_LINE", pdata["display_pos"], END_LINE_Y)
-
-    # ------------------------------------------------------
-    # DEFENDER TOUCHING END LINE
-    # ------------------------------------------------------
-
-    for pid, pdata in player_states.items():
-
-        if RAIDER_ID is not None and pid != RAIDER_ID:
-
-            px, py = pdata["pos"]
-
-            if abs(py - END_LINE_Y) < LINE_MARGIN:
-                log_event("DEFENDER_ENDLINE_TOUCH", pid, frame_idx)
-
-    # ------------------------------------------------------
-    # RAIDER TOUCHING BONUS / BAULK
-    # ------------------------------------------------------
-
-    if RAID_ASSIGNMENT_DONE and RAIDER_ID in player_states:
-
-        rx, ry = player_states[RAIDER_ID]["pos"]
-
-        if abs(ry - BONUS_Y) < LINE_MARGIN:
-            log_event("RAIDER_BONUS_TOUCH", RAIDER_ID, frame_idx)
-
-        if abs(ry - BAULK_Y) < LINE_MARGIN:
-            log_event("RAIDER_BAULK_TOUCH", RAIDER_ID, frame_idx)
-    
-    # ------------------------------------------------------
-    # LOBBY ENTRY RESTRICTION (BEFORE TOUCH)
-    # ------------------------------------------------------
-
-    for pid, pdata in player_states.items():
-
-        px, py = pdata["pos"]
-
-        if not touch_confirmed:
-
-            if px < LOBBY_LEFT or px > LOBBY_RIGHT:
-                log_event("ILLEGAL_LOBBY_ENTRY_BEFORE_TOUCH", pid, frame_idx)
-    
-    # ------------------------------------------------------
-    # RAIDER RETURN TO MIDDLE (AFTER TOUCH)
-    # ------------------------------------------------------
-
-    if touch_confirmed and RAIDER_ID in player_states:
-
-        rx, ry = player_states[RAIDER_ID]["pos"]
-
-        if ry < 0.8:
-            log_event("RAIDER_RETURNED_MIDDLE", RAIDER_ID, frame_idx)
+    player_states, active_players = build_player_states(GALLERY)
+    effective_raid_assignment = RAID_ASSIGNMENT_DONE and not RAIDER_EXITED
+    interaction_candidates, touch_confirmed = process_interactions(
+        frame_idx,
+        GALLERY,
+        player_states,
+        active_players,
+        RAIDER_ID,
+        effective_raid_assignment,
+        proposal_engine,
+        BONUS_Y,
+        BAULK_Y,
+        END_LINE_Y,
+        LINE_MARGIN,
+        LOBBY_LEFT,
+        LOBBY_RIGHT,
+        touch_confirmed,
+        log_event,
+    )
 
     # ------------------------------------------------------
     # EVENT WINDOW CLEANUP / FUTURE INVESTIGATION
@@ -827,7 +391,23 @@ while vs.running():
      
     
         
-    proposal_engine.finalize_frame_proposals()
+    frame_proposals = proposal_engine.finalize_frame_proposals()
+    scene_graph = None
+    if effective_raid_assignment and proposal_engine.candidate_proposals:
+        scene_graph = graph_engine.build_graph(
+            proposal_engine.candidate_proposals,
+            GALLERY,
+            RAIDER_ID
+        )
+    confirmed_events = candidate_manager.update(
+        frame_idx,
+        frame_proposals,
+        player_states,
+        RAIDER_ID,
+        scene_graph,
+    )
+    for confirmed_event in confirmed_events:
+        log_confirmed_event(confirmed_event)
     
     if frame_idx % 30 == 0:
         print(f"\n" + "█"*80)
@@ -895,13 +475,26 @@ while vs.running():
                 print(f"  ├─ Frame {p['frame']:05d} | {triplet:30} | Status: {status:10} | Dist: {p['features']['dist']:.2f}m")
 
 
-        if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+        recent_confirmed = [event for event in CONFIRMED_EVENT_LOG if frame_idx - event["frame"] <= 30]
+        if recent_confirmed:
+            print(f"\n [CONFIRMED EVENTS] TEMPORAL WINDOW OUTPUT:")
+            for event in recent_confirmed:
+                review_tag = " | Visual Review Window" if event["requires_visual_confirmation"] else ""
+                print(
+                    f"  â”œâ”€ Frame {event['frame']:05d} | {event['type']} "
+                    f"| Window: {event['window_start']:05d}-{event['window_end']:05d} "
+                    f"| Conf: {event['confidence']:.2f}"
+                    f"| Factor: {event.get('factor_confidence', 0):.2f}{review_tag}"
+                )
+
+        if effective_raid_assignment and proposal_engine.candidate_proposals:
             # Build the Graph and Encode Features
-            scene_graph = graph_engine.build_graph(
-                proposal_engine.candidate_proposals, 
-                GALLERY, 
-                RAIDER_ID
-            )
+            if scene_graph is None:
+                scene_graph = graph_engine.build_graph(
+                    proposal_engine.candidate_proposals,
+                    GALLERY,
+                    RAIDER_ID
+                )
             
             print(f"\n [GRAPH] DYNAMIC INTERACTION GRAPH CONSTRUCTED")
             print(f"  ├─ Active Nodes: {graph_engine.active_nodes}")
@@ -910,12 +503,75 @@ while vs.running():
             if graph_engine.adjacency_matrix.size > 0:
                 print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
 
+            # PHASE 2: Action Recognition and Point Calculation
+            action_results = action_engine.process_frame_actions(
+                scene_graph, 
+                proposal_engine.candidate_proposals, 
+                CONFIRMED_EVENT_LOG,
+                RAIDER_ID, 
+                frame_idx,
+                GALLERY,
+            )
+            
+            # Update global scores
+            total_score = action_results['total_points']
+            TOTAL_POINTS = total_score['attacker'] - total_score['defender']
+            CURRENT_RAID_POINTS += action_results['points_scored']
+            
+            if action_results.get('raid_ended', False):
+                CURRENT_RAID_POINTS = 0  # Reset for new raid
+            
+            print(f"\n [ACTIONS] RECOGNIZED ACTIONS THIS FRAME:")
+            for action in action_results["actions"]:
+                conf = action.get("confidence", 0)
+                print(f"  ├─ {action['type']}: {action['description']} | Points: {action.get('points', 0)} | Conf: {conf:.2f}")
+            print(f"  └─ Frame Points: {action_results['points_scored']} | Total Points: {action_results['total_points']}")
+            print(
+                f"     Scoreboard A/D: {total_score['attacker']}/{total_score['defender']} "
+                f"| Net: {TOTAL_POINTS}"
+            )
+            if action_results.get('confidence_scores'):
+                avg_conf = np.mean(action_results['confidence_scores']) if action_results['confidence_scores'] else 0
+                print(f"     Average Confidence: {avg_conf:.2f}")
+
+            # Display accuracy metrics every 100 frames
+            if frame_idx % 100 == 0 and 'accuracy_metrics' in action_results:
+                metrics = action_results['accuracy_metrics']
+                print(f"\n [ACCURACY] Estimated: {metrics['estimated_accuracy']:.1%} | High Conf: {metrics['high_confidence_rate']:.1%} | Total Actions: {metrics['total_actions']}")
+
         proposal_engine.reset_proposals()
+
+    recent_graph_events = [event for event in CONFIRMED_EVENT_LOG if frame_idx - event["frame"] <= 15]
+    graph_panel = render_graph_panel(
+        scene_graph,
+        width=GRAPH_W,
+        height=GRAPH_H,
+        frame_idx=frame_idx,
+        recent_events=recent_graph_events,
+    )
   
+    # Display current scores on mat
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+    # Add frame ID to video
+    cv2.putText(vis, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
+    combined_frame[:GRAPH_H, vis_w+COURT_W:vis_w+COURT_W+GRAPH_W] = graph_panel
+
+    report_builder.add_frame(frame_idx, combined_frame)
+    report_builder.capture_events(confirmed_events)
+    if report_builder.has_classifier_inputs():
+        classifier_inputs = report_builder.consume_classifier_inputs()
+        exported_windows = dataset_exporter.export_batch(classifier_inputs)
+        classifier_results = classifier_bridge.score_batch(classifier_inputs)
+        apply_classifier_results(CONFIRMED_EVENT_LOG, classifier_results)
+        if exported_windows:
+            print(f"[DATASET] Exported {len(exported_windows)} confirmed window(s) to Videos/classifier_dataset")
 
    
     
@@ -923,10 +579,23 @@ while vs.running():
         out.write(combined_frame)
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
     cv2.imshow("Half Court (2D)", mat)
+    cv2.imshow("Interaction Graph", graph_panel)
     
-    if cv2.waitKey(FPS_DELAY) & 0xFF == ord('q'): break
+    key = cv2.waitKey(0 if paused else FPS_DELAY)
+    if key & 0xFF == ord('q'):
+        break
+    elif key & 0xFF == ord('p'):
+        paused = not paused
 
 print("Total number of Interactions: ", INTERACTION_COUNT)
 if out is not None:
     out.release()
+if report_builder.has_segments():
+    wrote_report = report_builder.write_video(report_output_filename, 30.0, (canvas_w, canvas_h))
+    if wrote_report:
+        print(f"Confirmed interaction report saved to: {report_output_filename}")
+    else:
+        print("Confirmed interaction report could not be written.")
+else:
+    print("No confirmed interaction windows captured for report video.")
 cv2.destroyAllWindows()

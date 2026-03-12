@@ -1,9 +1,8 @@
-# video_stream.py
-
 import cv2
 import time
-from threading import Thread
 from queue import Queue
+from threading import Thread
+
 
 class VideoStream:
     def __init__(self, path, queue_size=5):
@@ -12,9 +11,9 @@ class VideoStream:
         self.queue = Queue(maxsize=queue_size)
 
     def start(self):
-        t = Thread(target=self.update)
-        t.daemon = True
-        t.start()
+        thread = Thread(target=self.update, args=())
+        thread.daemon = True
+        thread.start()
         return self
 
     def update(self):

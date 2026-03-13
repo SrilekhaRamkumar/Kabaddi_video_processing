@@ -15,9 +15,13 @@ from ultralytics import YOLO
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from kabaddi.core import VideoStream, apply_optical_flow, run_yolo_detection, update_tracks, add_new_tracks, render_gallery
-from kabaddi.interaction import InteractionProposalEngine, ActiveFactorGraphNetwork, build_player_states, process_interactions, TemporalInteractionCandidateManager
-from kabaddi.reasoning import KabaddiAFGNEngine, collect_raider_stats, assign_raider
-from kabaddi.visualization import ConfirmedInteractionReportBuilder
+from kabaddi.interaction import (
+    InteractionProposalEngine, ActiveFactorGraphNetwork, render_graph_panel,
+    build_player_states, process_interactions, TemporalInteractionCandidateManager,
+    ConfirmedWindowClassifierBridge
+)
+from kabaddi.reasoning import KabaddiAFGNEngine, collect_raider_stats, assign_raider, ActionRecognitionEngine
+from kabaddi.visualization import ConfirmedInteractionReportBuilder, ConfirmedWindowDatasetExporter
 from kabaddi.utils import (
     compute_homography, create_court_mat, court_to_pixel,
     BAULK_LINE_Y, BONUS_LINE_Y, MID_LINE_Y, END_LINE_Y,
@@ -66,6 +70,8 @@ graph_engine = ActiveFactorGraphNetwork(top_k=4)
 action_engine = KabaddiAFGNEngine()
 candidate_manager = TemporalInteractionCandidateManager()
 report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)
+classifier_bridge = ConfirmedWindowClassifierBridge()
+dataset_exporter = ConfirmedWindowDatasetExporter(os.path.join("Videos", "classifier_dataset"), fps=30.0)
 
 # Device setup
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -89,6 +95,8 @@ frame_idx = 0
 RAIDER_ID = None
 RAIDER_STATS = {}
 RAID_ASSIGNMENT_DONE = False
+RAIDER_EXITED = False
+RAIDER_MISSING_FRAMES = 0
 
 # Event tracking
 EVENT_LOG = []
@@ -127,6 +135,22 @@ def log_confirmed_event(event):
     CONFIRMED_EVENT_LOG.append(event)
 
 
+def apply_classifier_results(confirmed_log, classifier_results):
+    """Apply classifier results to confirmed events."""
+    if not classifier_results:
+        return
+    result_map = {result["event_key"]: result for result in classifier_results}
+    for event in confirmed_log:
+        event_key = (event["type"], event["frame"], event["subject"], event["object"])
+        classifier_result = result_map.get(event_key)
+        if classifier_result is None:
+            continue
+        event["classifier_result"] = classifier_result
+        event["classifier_valid_prob"] = classifier_result["probabilities"].get("valid", 0.0)
+        event["classifier_label"] = classifier_result["predicted_label"]
+        event["guaranteed_by_classifier"] = classifier_result["guaranteed"]
+
+
 # ======================================================
 # OUTPUT SETUP
 # ======================================================
@@ -135,10 +159,14 @@ video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
 output_filename = f"Videos/processed_{video_stem}_{path_hash}.mp4"
 report_output_filename = f"Videos/confirmed_report_{video_stem}_{path_hash}.mp4"
 
+# Graph panel dimensions
+GRAPH_W = 400
+GRAPH_H = 600
+
 vis_w = int(1920 * DISPLAY_SCALE)
 vis_h = int(1080 * DISPLAY_SCALE)
-canvas_w = vis_w + COURT_MAT_WIDTH
-canvas_h = max(vis_h, COURT_MAT_HEIGHT)
+canvas_w = vis_w + COURT_MAT_WIDTH + GRAPH_W
+canvas_h = max(vis_h, COURT_MAT_HEIGHT, GRAPH_H)
 
 if os.path.exists(output_filename):
     print(f"Playback only: {output_filename} already exists. Skipping recording.")
@@ -152,6 +180,7 @@ else:
 cv2.namedWindow("Video (Integrated)")
 cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 cv2.namedWindow("Half Court (2D)")
+cv2.namedWindow("Interaction Graph")
 
 # Playback control
 paused = False
@@ -209,12 +238,34 @@ while vs.running():
     render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel_fn, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_TRACK_AGE)
 
     # ======================================================
+    # RAIDER EXIT DETECTION
+    # ======================================================
+    if RAID_ASSIGNMENT_DONE and RAIDER_ID is not None:
+        raider_track = GALLERY.get(RAIDER_ID)
+        raider_missing = (
+            raider_track is None
+            or raider_track.get("age", 0) > 15
+            or (
+                raider_track.get("display_pos") is None
+                and raider_track.get("miss_streak", 0) > 10
+            )
+        )
+        if raider_missing:
+            RAIDER_MISSING_FRAMES += 1
+        else:
+            RAIDER_MISSING_FRAMES = 0
+
+        if RAIDER_MISSING_FRAMES >= 25 and not RAIDER_EXITED:
+            RAIDER_EXITED = True
+            print(f"RAIDER EXIT LOCK ENGAGED at frame {frame_idx} for ID {RAIDER_ID}")
+
+    # ======================================================
     # RAIDER IDENTIFICATION
     # ======================================================
-    if not RAID_ASSIGNMENT_DONE and frame_idx < RAIDER_ASSIGN_FRAME:
+    if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx < RAIDER_ASSIGN_FRAME:
         collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_LINE_Y)
 
-    if not RAID_ASSIGNMENT_DONE and frame_idx >= RAIDER_ASSIGN_FRAME:
+    if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx >= RAIDER_ASSIGN_FRAME:
         best_id, raid_done, assign_frame = assign_raider(
             GALLERY,
             RAIDER_STATS,
@@ -232,13 +283,14 @@ while vs.running():
     # INTERACTION LOGIC & PROPOSAL LAYER
     # ======================================================
     player_states, active_players = build_player_states(GALLERY)
+    effective_raid_assignment = RAID_ASSIGNMENT_DONE and not RAIDER_EXITED
     interaction_candidates, touch_confirmed = process_interactions(
         frame_idx,
         GALLERY,
         player_states,
         active_players,
         RAIDER_ID,
-        RAID_ASSIGNMENT_DONE,
+        effective_raid_assignment,
         proposal_engine,
         BONUS_LINE_Y,
         BAULK_LINE_Y,
@@ -265,7 +317,7 @@ while vs.running():
     # ======================================================
     frame_proposals = proposal_engine.finalize_frame_proposals()
     scene_graph = None
-    if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+    if effective_raid_assignment and proposal_engine.candidate_proposals:
         scene_graph = graph_engine.build_graph(
             proposal_engine.candidate_proposals,
             GALLERY,
@@ -343,7 +395,7 @@ while vs.running():
                 )
 
         # Print graph info
-        if RAID_ASSIGNMENT_DONE and proposal_engine.candidate_proposals:
+        if effective_raid_assignment and proposal_engine.candidate_proposals:
             if scene_graph is None:
                 scene_graph = graph_engine.build_graph(
                     proposal_engine.candidate_proposals,
@@ -396,6 +448,16 @@ while vs.running():
 
         proposal_engine.reset_proposals()
 
+    # Render graph panel
+    recent_graph_events = [event for event in CONFIRMED_EVENT_LOG if frame_idx - event["frame"] <= 15]
+    graph_panel = render_graph_panel(
+        scene_graph,
+        width=GRAPH_W,
+        height=GRAPH_H,
+        frame_idx=frame_idx,
+        recent_events=recent_graph_events,
+    )
+
     # Update scores on mat
     cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
     cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
@@ -403,15 +465,25 @@ while vs.running():
     # Add frame ID to video
     cv2.putText(vis, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-    # Combine video and court mat
+    # Combine video, court mat, and graph panel
     vis_render = cv2.resize(vis, (vis_w, vis_h), interpolation=cv2.INTER_NEAREST)
     combined_frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
     combined_frame[:vis_h, :vis_w] = vis_render
     combined_frame[:COURT_MAT_HEIGHT, vis_w:vis_w+COURT_MAT_WIDTH] = mat
+    combined_frame[:GRAPH_H, vis_w+COURT_MAT_WIDTH:vis_w+COURT_MAT_WIDTH+GRAPH_W] = graph_panel
 
     # Add to report builder
     report_builder.add_frame(frame_idx, combined_frame)
     report_builder.capture_events(confirmed_events)
+
+    # Process classifier inputs if available
+    if report_builder.has_classifier_inputs():
+        classifier_inputs = report_builder.consume_classifier_inputs()
+        exported_windows = dataset_exporter.export_batch(classifier_inputs)
+        classifier_results = classifier_bridge.score_batch(classifier_inputs)
+        apply_classifier_results(CONFIRMED_EVENT_LOG, classifier_results)
+        if exported_windows:
+            print(f"[DATASET] Exported {len(exported_windows)} confirmed window(s) to Videos/classifier_dataset")
 
     # Write output
     if out is not None:
@@ -420,6 +492,7 @@ while vs.running():
     # Display
     cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
     cv2.imshow("Half Court (2D)", mat)
+    cv2.imshow("Interaction Graph", graph_panel)
 
     # Handle keyboard input
     key = cv2.waitKey(0 if paused else FPS_DELAY)

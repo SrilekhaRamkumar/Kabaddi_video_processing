@@ -1,7 +1,3 @@
-"""
-Kabaddi AFGN Reasoning Engine
-Handles action recognition, game state management, and scoring logic.
-"""
 import numpy as np
 
 
@@ -90,23 +86,30 @@ class KabaddiAFGNEngine:
     def _build_context(self, scene_graph, proposals, confirmed_events, raider_id, frame_idx, gallery, node_map, raider_node):
         raider_pos = np.array(raider_node["spatial"])
         raider_speed = np.linalg.norm(np.array(raider_node["motion"]))
-        defenders = [node for node in scene_graph["nodes"] if node["id"] != raider_id and node["spatial"] is not None]
+        active_defenders = [node for node in scene_graph["nodes"] if node["id"] != raider_id and node["spatial"] is not None]
+        full_nodes = scene_graph.get("full_nodes", scene_graph.get("nodes", []))
+        defenders = [node for node in full_nodes if node["id"] != raider_id and node["spatial"] is not None]
         pair_factors = scene_graph.get("pair_factors", [])
         line_factors = scene_graph.get("line_factors", [])
         third_order_factors = scene_graph.get("factor_nodes", [])
+        full_pair_factors = scene_graph.get("full_pair_factors", pair_factors)
+        full_line_factors = scene_graph.get("full_line_factors", line_factors)
+        full_factor_nodes = scene_graph.get("full_factor_nodes", third_order_factors)
+        global_context = scene_graph.get("global_context", {})
 
         pairwise_contacts = []
-        for pair_factor in pair_factors:
-            if pair_factor["type"] != "RAIDER_DEFENDER_PAIR":
+        for pair_factor in full_pair_factors:
+            if pair_factor["type"] not in {"RAIDER_DEFENDER_PAIR", "DEFENDER_RAIDER_PAIR"}:
                 continue
             subject_id, object_id = pair_factor["nodes"]
-            if subject_id != raider_id:
+            defender_id = object_id if subject_id == raider_id else subject_id
+            if raider_id not in (subject_id, object_id):
                 continue
-            defender_node = node_map.get(object_id)
+            defender_node = next((node for node in defenders if node["id"] == defender_id), None)
             if defender_node is None or defender_node["spatial"] is None:
                 continue
             pair_score = self._pair_factor_score(pair_factor)
-            pairwise_contacts.append((object_id, pair_factor, pair_score))
+            pairwise_contacts.append((defender_id, pair_factor, pair_score))
 
         if not pairwise_contacts:
             for proposal in proposals:
@@ -118,7 +121,7 @@ class KabaddiAFGNEngine:
                     pairwise_contacts.append((proposal["O"], proposal, pair_score))
 
         line_factor_map = {}
-        for line_factor in line_factors:
+        for line_factor in full_line_factors:
             if line_factor["nodes"]:
                 line_factor_map[(line_factor["nodes"][0], line_factor["line"])] = line_factor
 
@@ -126,6 +129,14 @@ class KabaddiAFGNEngine:
             node["id"]
             for node in defenders
             if np.linalg.norm(np.array(node["spatial"]) - raider_pos) < 1.1
+        ]
+        containment_factors = [
+            factor for factor in full_factor_nodes
+            if factor.get("type") == "DEFENDER_CONTAINMENT" and raider_id in factor.get("triplet", ())
+        ]
+        line_triplet_factors = [
+            factor for factor in full_factor_nodes
+            if factor.get("type") == "RAIDER_DEFENDER_LINE" and factor.get("triplet", (None,))[0] == raider_id
         ]
 
         return {
@@ -135,6 +146,7 @@ class KabaddiAFGNEngine:
             "raider_pos": raider_pos,
             "raider_speed": raider_speed,
             "defenders": defenders,
+            "active_defenders": active_defenders,
             "gallery": gallery,
             "confirmed_events": confirmed_events,
             "pairwise_contacts": pairwise_contacts,
@@ -142,9 +154,14 @@ class KabaddiAFGNEngine:
             "defenders_on_court": max(0, len(defenders)),
             "higher_order_pressure": max(
                 self._higher_order_pressure(raider_pos, defenders),
-                self._graph_pressure_score(third_order_factors, raider_id),
+                self._graph_pressure_score(full_factor_nodes, raider_id),
             ),
             "line_factor_map": line_factor_map,
+            "containment_factors": containment_factors,
+            "line_triplet_factors": line_triplet_factors,
+            "global_context": global_context,
+            "full_pair_factors": full_pair_factors,
+            "full_factor_nodes": full_factor_nodes,
         }
 
     def _infer_raid_progress_events(self, context):
@@ -223,7 +240,20 @@ class KabaddiAFGNEngine:
         raider_speed = context["raider_speed"]
         pressure = context["higher_order_pressure"]
         defenders_on_court = context["defenders_on_court"]
-        tackle_conf = min(1.0, 0.35 * pressure + 0.35 * max(0.0, 1.0 - raider_speed / 0.35) + 0.30 * min(1.0, len(context["nearby_defenders"]) / 3.0))
+        containment = max(
+            [factor["features"].get("angle", 0.0) for factor in context["containment_factors"]],
+            default=0.0,
+        )
+        support = min(1.0, len(context["nearby_defenders"]) / 3.0)
+        full_graph_pressure = min(1.0, context["global_context"].get("best_contact_score", 0.0) + 0.35 * containment)
+        tackle_conf = min(
+            1.0,
+            0.25 * pressure
+            + 0.20 * full_graph_pressure
+            + 0.25 * max(0.0, 1.0 - raider_speed / 0.35)
+            + 0.20 * support
+            + 0.10 * min(1.0, context["global_context"].get("best_containment_score", 0.0)),
+        )
 
         if len(context["nearby_defenders"]) >= 2 and tackle_conf >= 0.6:
             actions.append(self._make_action("DEFENDER_ASSIST_TACKLE", context["frame_idx"], tackle_conf, "Multiple defenders are engaging the raider"))
@@ -282,6 +312,8 @@ class KabaddiAFGNEngine:
 
     def _apply_rules(self, actions, context):
         finalized = []
+        consistency_scores = self._consistency_scores(context)
+        actions = self._apply_consistency_to_actions(actions, consistency_scores)
         actions_by_type = {action["type"]: action for action in self._dedupe_actions(actions)}
         touch_count = len(self.current_raid["touched_defenders"])
 
@@ -373,6 +405,68 @@ class KabaddiAFGNEngine:
             self._reset_raid_state()
         return finalized
 
+    def _consistency_scores(self, context):
+        scores = {
+            "contact_legality": 1.0,
+            "bonus_legality": 1.0,
+            "tackle_legality": 1.0,
+            "return_legality": 1.0,
+            "lobby_legality": 1.0,
+        }
+
+        if not context["pairwise_contacts"]:
+            scores["contact_legality"] *= 0.65
+        elif max(score for _, _, score in context["pairwise_contacts"]) < 0.55:
+            scores["contact_legality"] *= 0.8
+
+        if context["global_context"].get("visible_defenders", 0) < 6:
+            scores["bonus_legality"] *= 0.7
+
+        if len(context["nearby_defenders"]) < 2:
+            scores["tackle_legality"] *= 0.72
+        if context["raider_speed"] > 0.45:
+            scores["tackle_legality"] *= 0.78
+        if context["global_context"].get("best_containment_score", 0.0) < 0.18:
+            scores["tackle_legality"] *= 0.82
+
+        if not self.current_raid["touch_occurred"] and not self.current_raid["bonus_touch"]:
+            scores["return_legality"] *= 0.75
+
+        rx = context["raider_pos"][0]
+        if 0.75 <= rx <= 9.25:
+            scores["lobby_legality"] *= 0.65
+        if self.current_raid["touch_occurred"]:
+            scores["lobby_legality"] *= 0.85
+
+        return scores
+
+    def _apply_consistency_to_actions(self, actions, consistency_scores):
+        adjusted = []
+        for action in actions:
+            confidence = action["confidence"]
+            if action["type"] in {"RAIDER_DEFENDER_CONTACT", "RAIDER_MULTIPLE_DEFENDER_TOUCH", "LOBBY_ACTIVATED"}:
+                confidence *= consistency_scores["contact_legality"]
+            elif action["type"] in {"RAIDER_CROSSED_BONUS_LINE", "RAIDER_BONUS_TOUCH"}:
+                confidence *= consistency_scores["bonus_legality"]
+            elif action["type"] in {"DEFENDER_ASSIST_TACKLE", "DEFENDER_TACKLE", "RAIDER_CAUGHT", "SUPER_TACKLE_TRIGGER"}:
+                confidence *= consistency_scores["tackle_legality"]
+            elif action["type"] == "RAIDER_RETURNED_MIDDLE":
+                confidence *= consistency_scores["return_legality"]
+            elif action["type"] in {"RAIDER_LOBBY_ENTRY", "RAIDER_ILLEGAL_LOBBY_ENTRY"}:
+                confidence *= consistency_scores["lobby_legality"]
+
+            action = dict(action)
+            action["confidence"] = float(np.clip(confidence, 0.0, 1.0))
+            action["consistency"] = {
+                "contact": consistency_scores["contact_legality"],
+                "bonus": consistency_scores["bonus_legality"],
+                "tackle": consistency_scores["tackle_legality"],
+                "return": consistency_scores["return_legality"],
+                "lobby": consistency_scores["lobby_legality"],
+            }
+            adjusted.append(action)
+        return adjusted
+
     def _reset_raid_state(self):
         self.current_raid = self._new_raid_state()
         self.touched_defenders.clear()
@@ -449,18 +543,22 @@ class KabaddiAFGNEngine:
     def _graph_pressure_score(self, factor_nodes, raider_id):
         scores = []
         for factor in factor_nodes:
-            if factor.get("type") != "THIRD_ORDER_PRESSURE":
-                continue
             triplet = factor.get("triplet", ())
             if raider_id not in triplet:
                 continue
-            distances = factor["features"].get("distances", [])
-            spread = factor["features"].get("spread", 1.0)
-            if not distances:
-                continue
-            compactness = max(0.0, 1.0 - np.mean(distances) / 1.8)
-            spread_score = max(0.0, 1.0 - spread / 0.9)
-            scores.append(0.6 * compactness + 0.4 * spread_score)
+            factor_type = factor.get("type")
+            if factor_type == "THIRD_ORDER_PRESSURE":
+                distances = factor["features"].get("distances", [])
+                spread = factor["features"].get("spread", 1.0)
+                if not distances:
+                    continue
+                compactness = factor["features"].get("compactness", max(0.0, 1.0 - np.mean(distances) / 1.8))
+                spread_score = max(0.0, 1.0 - spread / 0.9)
+                scores.append(0.6 * compactness + 0.4 * spread_score)
+            elif factor_type == "DEFENDER_CONTAINMENT":
+                angle = factor["features"].get("angle", 0.0)
+                spread = factor["features"].get("spread", 1.0)
+                scores.append(0.7 * angle + 0.3 * max(0.0, 1.0 - spread / 1.0))
         return float(np.clip(max(scores) if scores else 0.0, 0.0, 1.0))
 
     def _line_touch_confidence(self, confirmed_events, event_type, fallback=0.0):
@@ -509,4 +607,3 @@ class KabaddiAFGNEngine:
                 self.accuracy_stats["high_confidence_actions"] += 1
         if factor_scores:
             self.accuracy_stats["factor_consistency"] = float(np.clip(np.mean(factor_scores), 0.0, 1.0))
-

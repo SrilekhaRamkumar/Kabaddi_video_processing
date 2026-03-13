@@ -1,7 +1,3 @@
-"""
-Report Video Builder Module
-Generates event-specific video clips with annotations.
-"""
 from collections import deque
 
 import cv2
@@ -14,6 +10,7 @@ class ConfirmedInteractionReportBuilder:
         self.segments = []
         self.pending_events = []
         self.captured_event_keys = set()
+        self.classifier_inputs = []
 
     def add_frame(self, frame_idx, frame):
         self.frame_buffer.append((frame_idx, frame.copy()))
@@ -32,6 +29,14 @@ class ConfirmedInteractionReportBuilder:
 
     def has_segments(self):
         return bool(self.segments or self.pending_events)
+
+    def has_classifier_inputs(self):
+        return bool(self.classifier_inputs)
+
+    def consume_classifier_inputs(self):
+        inputs = list(self.classifier_inputs)
+        self.classifier_inputs.clear()
+        return inputs
 
     def write_video(self, output_path, fps, frame_size):
         if not self.segments:
@@ -71,16 +76,23 @@ class ConfirmedInteractionReportBuilder:
                 continue
 
             segment_frames = []
+            classifier_frames = []
             for frame_idx in range(event["window_start"], event["window_end"] + 1):
                 frame = frame_map.get(frame_idx)
                 if frame is None:
                     continue
+                classifier_frames.append(frame.copy())
                 segment_frames.append(self._annotate_frame(frame, event, frame_idx))
 
             if segment_frames:
                 self.segments.append({
                     "event": event,
                     "frames": segment_frames,
+                })
+                self.classifier_inputs.append({
+                    "event": event,
+                    "frames": classifier_frames,
+                    "payload": event.get("classifier_payload", {}),
                 })
 
         self.pending_events = remaining
@@ -109,10 +121,32 @@ class ConfirmedInteractionReportBuilder:
             (255, 255, 255),
             2,
         )
+        family = event.get("event_family", "")
+        line_name = event.get("line_name")
+        if family or line_name:
+            family_text = f"Family: {family}" if family else ""
+            if line_name:
+                family_text = f"{family_text} | Line: {line_name}" if family_text else f"Line: {line_name}"
+            cv2.putText(
+                annotated,
+                family_text,
+                (32, 108),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (180, 220, 255),
+                2,
+            )
+            core_y = 134
+            metrics_y = 160
+            classifier_y = 186
+        else:
+            core_y = 108
+            metrics_y = 134
+            classifier_y = 160
         cv2.putText(
             annotated,
             f"Core: {event.get('core_window_start', event['window_start'])} - {event.get('core_window_end', event['window_end'])}",
-            (32, 108),
+            (32, core_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (180, 255, 180),
@@ -121,12 +155,24 @@ class ConfirmedInteractionReportBuilder:
         cv2.putText(
             annotated,
             f"Frame: {frame_idx} | Conf: {event['confidence']:.2f} | Factor: {event.get('factor_confidence', 0.0):.2f}",
-            (32, 134),
+            (32, metrics_y),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (180, 255, 180),
             2,
         )
+        classifier_result = event.get("classifier_result")
+        if classifier_result:
+            valid_prob = classifier_result["probabilities"].get("valid", 0.0)
+            cv2.putText(
+                annotated,
+                f"Classifier: {classifier_result['predicted_label']} | Valid {valid_prob:.2f}",
+                (32, classifier_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (120, 220, 255) if classifier_result.get("guaranteed") else (210, 210, 210),
+                2,
+            )
         return annotated
 
     def _build_title_card(self, frame_size, event, segment_idx, total_segments):
@@ -169,5 +215,34 @@ class ConfirmedInteractionReportBuilder:
             (180, 255, 180),
             2,
         )
+        family = event.get("event_family", "")
+        line_name = event.get("line_name")
+        if family or line_name:
+            family_text = f"Family {family}" if family else ""
+            if line_name:
+                family_text = f"{family_text} | Line {line_name}" if family_text else f"Line {line_name}"
+            cv2.putText(
+                card,
+                family_text,
+                (40, 220),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (180, 220, 255),
+                2,
+            )
+            classifier_y = 255
+        else:
+            classifier_y = 220
+        classifier_result = event.get("classifier_result")
+        if classifier_result:
+            valid_prob = classifier_result["probabilities"].get("valid", 0.0)
+            cv2.putText(
+                card,
+                f"Classifier {classifier_result['predicted_label']} | Valid {valid_prob:.2f}",
+                (40, classifier_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.75,
+                (120, 220, 255) if classifier_result.get("guaranteed") else (210, 210, 210),
+                2,
+            )
         return card
-

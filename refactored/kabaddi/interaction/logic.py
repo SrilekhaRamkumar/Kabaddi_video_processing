@@ -1,7 +1,3 @@
-"""
-Interaction Logic Module
-Handles player state building and interaction processing.
-"""
 import numpy as np
 
 
@@ -104,4 +100,3 @@ def process_interactions(
             log_event("RAIDER_RETURNED_MIDDLE", raider_id, frame_idx)
 
     return interaction_candidates, touch_confirmed
-

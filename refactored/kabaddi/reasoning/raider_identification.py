@@ -1,7 +1,3 @@
-"""
-Raider Identification Module
-Handles raider detection based on motion, depth, and convergence patterns.
-"""
 import numpy as np
 
 
@@ -92,4 +88,3 @@ def assign_raider(gallery, raider_stats, frame_idx, assign_frame, baulk_y, bonus
             best_id = pid
 
     return best_id, best_id is not None, assign_frame
-

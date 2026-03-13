@@ -1,7 +1,3 @@
-"""
-Threaded Video Stream Module
-Provides efficient video reading using background threading.
-"""
 import cv2
 import time
 from queue import Queue
@@ -36,4 +32,3 @@ class VideoStream:
 
     def running(self):
         return not self.stopped or not self.queue.empty()
-

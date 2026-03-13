@@ -1,0 +1,85 @@
+# Kabaddi Action Recognition Configuration
+
+# Video Processing
+video:
+  input_path: "Videos/raid1.mp4"
+  display_scale: 0.5
+  fps_delay: 1
+  output_dir: "Videos"
+
+# Model Configuration
+model:
+  path: "yolov8n.pt"
+  confidence_threshold: 0.4
+  device: "auto"  # auto, cuda, or cpu
+
+# Tracking Parameters
+tracking:
+  max_players: 8
+  max_age: 200
+  smooth_alpha: 0.25
+  hsv_bins: [8, 8, 8]
+
+# Court Dimensions (meters)
+court:
+  width: 10.0
+  height: 6.5
+  baulk_line_y: 3.75
+  bonus_line_y: 4.75
+  mid_line_y: 0.0
+  end_line_y: 6.5
+  lobby_left_x: 0.75
+  lobby_right_x: 9.25
+
+# Court Lines (image coordinates - calibrated for specific video)
+court_lines:
+  baulk: [[606, 483], [1771, 1078]]
+  bonus: [[745, 471], [1918, 960]]
+  middle: [[55, 486], [0, 575]]
+  end_back: [[885, 471], [1918, 763]]
+  end_left: [[58, 490], [885, 473]]
+  end_right: [[1833, 1076], [1916, 1041]]
+  lobby_left: [[45, 525], [921, 493]]
+  lobby_right: [[690, 1076], [1915, 821]]
+
+# Interaction Detection
+interaction:
+  distance_threshold: 1.5
+  touch_distance_threshold: 1.0
+  line_margin: 0.25
+  interaction_window: 20
+
+# Temporal Validation
+temporal:
+  max_gap: 3
+  pre_context: 10
+  post_context: 10
+
+# Raider Identification
+raider:
+  assign_frame: 70
+  min_frames_for_decision: 40
+
+# Action Recognition Confidence Thresholds
+confidence:
+  min_action: 0.58
+  min_contact: 0.58
+  min_line_touch: 0.62
+  min_tackle: 0.68
+
+# Visualization
+visualization:
+  court_mat_width: 400
+  court_mat_height: 260
+  max_buffer_frames: 300
+  log_interval: 30  # frames
+
+# Colors (BGR format)
+colors:
+  raider: [0, 255, 0]
+  defender: [255, 0, 0]
+  track: [255, 255, 0]
+  interaction: [0, 255, 255]
+  text: [255, 255, 255]
+  background: [0, 0, 0]
+

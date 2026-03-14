@@ -21,7 +21,7 @@ from video_stream import VideoStream
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
 
-VIDEO_PATH = "Videos/raid1.mp4"
+VIDEO_PATH = "Videos/Cam1/raid1.mp4"
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -56,6 +56,24 @@ lines = {
     "lobby_right": [(690, 1076), (1915, 821)],
 }
 
+lines2 = {
+    "baulk": [(606, 291), (378, 128)],
+    "bonus": [(678, 269), (427, 123)],
+    "middle": [(215, 410), (213, 144)],
+    "end_back": [(847, 268), (462, 112)],
+    "end_left": [(215, 132), (462, 114)],
+    "end_right": [(224, 512), (847, 268)],
+    "lobby_left": [(213, 143), (477, 120)],
+    "lobby_right": [(223, 407), (773, 237)],
+}
+
+
+def select_line_coordinates(video_path):
+    normalized_path = video_path.replace("\\", "/").lower()
+    if "/cam2/" in normalized_path:
+        return lines2, "Cam2"
+    return lines, "Cam1"
+
 # ======================================================
 # MATH & HOMOGRAPHY
 # ======================================================
@@ -71,7 +89,10 @@ def intersect(l1, l2):
     if abs(d) < 1e-6: return None
     return [(b1*c2 - b2*c1) / d, (a2*c1 - a1*c2) / d]
 
-L = {k: line_eq(*v) for k, v in lines.items()}
+ACTIVE_LINES, ACTIVE_CAMERA = select_line_coordinates(VIDEO_PATH)
+print(f"Using {ACTIVE_CAMERA} court coordinates for {os.path.basename(VIDEO_PATH)}")
+
+L = {k: line_eq(*v) for k, v in ACTIVE_LINES.items()}
 img_pts = np.array([intersect(L[a], L[b]) for a, b in [
     ("end_back", "end_left"), ("end_back", "end_right"),
     ("middle", "end_left"), ("middle", "end_right")

@@ -16,7 +16,7 @@ from temporal_events import TemporalInteractionCandidateManager
 from tracking_pipeline import apply_optical_flow, run_yolo_detection, update_tracks, add_new_tracks, render_gallery
 from video_stream import VideoStream
 
-#COMMIT CHECK 12/3
+#COMMIT CHECK 15/3
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================

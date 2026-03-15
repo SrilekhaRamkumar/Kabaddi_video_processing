@@ -1,0 +1,168 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_BONUS_TOUCH",
+    "event_family": "HLI",
+    "frame": 467,
+    "window_start": 456,
+    "window_end": 477,
+    "core_window_start": 466,
+    "core_window_end": 467,
+    "subject": 0,
+    "object": "BONUS",
+    "line_name": "BONUS",
+    "confidence": 0.6865609765052796,
+    "factor_confidence": 0.5,
+    "requires_visual_confirmation": false
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_BONUS_TOUCH",
+    "event_family": "HLI",
+    "subject": 0,
+    "object": "BONUS",
+    "line_name": "BONUS",
+    "window_frames": [
+      456,
+      457,
+      458,
+      459,
+      460,
+      461,
+      462,
+      463,
+      464,
+      465,
+      466,
+      467,
+      468,
+      469,
+      470,
+      471,
+      472,
+      473,
+      474,
+      475,
+      476,
+      477
+    ],
+    "core_frames": [
+      466,
+      467
+    ],
+    "temporal_trace": [
+      {
+        "frame": 456,
+        "visible_defenders": 4,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 457,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 458,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 459,
+        "visible_defenders": 4,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 460,
+        "visible_defenders": 4,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 461,
+        "visible_defenders": 4,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 462,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 463,
+        "visible_defenders": 6,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 464,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 465,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 0.0
+      },
+      {
+        "frame": 466,
+        "visible_defenders": 5,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.6235747337341309
+      },
+      {
+        "frame": 467,
+        "visible_defenders": 6,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.6837754249572754
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.8109349608421326,
+      "avg_factor_confidence": 0.5,
+      "peak_window_pair_score": 0.0,
+      "peak_window_line_score": 0.9011284670571574,
+      "peak_window_containment": 0.0,
+      "visible_defenders": 6
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        8,
+        4,
+        5,
+        0
+      ],
+      "global_context": {
+        "visible_players": 7,
+        "visible_defenders": 6,
+        "raider_in_active_graph": true,
+        "max_influence": 7.246546745300293,
+        "mean_defender_depth": 3.5777833461761475,
+        "defender_width_span": 3.4631309509277344,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.6837754249572754
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "",
+  "notes": ""
+}

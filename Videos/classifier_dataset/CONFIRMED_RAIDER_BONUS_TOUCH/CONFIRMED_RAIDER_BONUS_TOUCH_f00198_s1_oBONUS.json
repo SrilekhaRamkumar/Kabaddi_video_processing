@@ -1,0 +1,98 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_BONUS_TOUCH",
+    "event_family": "HLI",
+    "frame": 198,
+    "window_start": 187,
+    "window_end": 208,
+    "core_window_start": 197,
+    "core_window_end": 198,
+    "subject": 1,
+    "object": "BONUS",
+    "line_name": "BONUS",
+    "confidence": 0.6924200296401977,
+    "factor_confidence": 0.5,
+    "requires_visual_confirmation": false
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_BONUS_TOUCH",
+    "event_family": "HLI",
+    "subject": 1,
+    "object": "BONUS",
+    "line_name": "BONUS",
+    "window_frames": [
+      187,
+      188,
+      189,
+      190,
+      191,
+      192,
+      193,
+      194,
+      195,
+      196,
+      197,
+      198,
+      199,
+      200,
+      201,
+      202,
+      203,
+      204,
+      205,
+      206,
+      207,
+      208
+    ],
+    "core_frames": [
+      197,
+      198
+    ],
+    "temporal_trace": [
+      {
+        "frame": 197,
+        "visible_defenders": 3,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.8629965782165527
+      },
+      {
+        "frame": 198,
+        "visible_defenders": 3,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.8256268501281738
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.8207000494003296,
+      "avg_factor_confidence": 0.5,
+      "peak_window_pair_score": 0.42386432033825827,
+      "peak_window_line_score": 0.78690404625831,
+      "peak_window_containment": 0.0,
+      "visible_defenders": 3
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        0,
+        3,
+        2,
+        1
+      ],
+      "global_context": {
+        "visible_players": 3,
+        "visible_defenders": 3,
+        "raider_in_active_graph": true,
+        "max_influence": 3.9674846032716937,
+        "mean_defender_depth": 4.847757816314697,
+        "defender_width_span": 3.412527084350586,
+        "best_contact_score": 0.0,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.8256268501281738
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "",
+  "notes": ""
+}

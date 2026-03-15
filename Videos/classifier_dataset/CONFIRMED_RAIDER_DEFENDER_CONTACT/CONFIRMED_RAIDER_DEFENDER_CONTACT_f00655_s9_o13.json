@@ -1,0 +1,564 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "frame": 655,
+    "window_start": 600,
+    "window_end": 665,
+    "core_window_start": 610,
+    "core_window_end": 655,
+    "subject": 9,
+    "object": 13,
+    "line_name": null,
+    "confidence": 0.5804482807917648,
+    "factor_confidence": 0.44785973186375055,
+    "requires_visual_confirmation": true
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "subject": 9,
+    "object": 13,
+    "line_name": null,
+    "window_frames": [
+      600,
+      601,
+      602,
+      603,
+      604,
+      605,
+      606,
+      607,
+      608,
+      609,
+      610,
+      611,
+      612,
+      613,
+      614,
+      615,
+      616,
+      617,
+      618,
+      619,
+      620,
+      621,
+      622,
+      623,
+      624,
+      625,
+      626,
+      627,
+      628,
+      629,
+      630,
+      631,
+      632,
+      633,
+      634,
+      635,
+      636,
+      637,
+      638,
+      639,
+      640,
+      641,
+      642,
+      643,
+      644,
+      645,
+      646,
+      647,
+      648,
+      649,
+      650,
+      651,
+      652,
+      653,
+      654,
+      655,
+      656,
+      657,
+      658,
+      659,
+      660,
+      661,
+      662,
+      663,
+      664,
+      665
+    ],
+    "core_frames": [
+      610,
+      611,
+      612,
+      613,
+      614,
+      615,
+      616,
+      617,
+      618,
+      619,
+      620,
+      621,
+      622,
+      623,
+      624,
+      625,
+      626,
+      627,
+      628,
+      629,
+      630,
+      631,
+      632,
+      633,
+      634,
+      635,
+      636,
+      637,
+      638,
+      639,
+      640,
+      641,
+      642,
+      643,
+      644,
+      645,
+      646,
+      647,
+      648,
+      649,
+      650,
+      651,
+      652,
+      653,
+      654,
+      655
+    ],
+    "temporal_trace": [
+      {
+        "frame": 600,
+        "visible_defenders": 11,
+        "best_contact_score": 0.457533707221349,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 4.645049095153809
+      },
+      {
+        "frame": 601,
+        "visible_defenders": 11,
+        "best_contact_score": 0.28446312745412183,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 4.6306471824646
+      },
+      {
+        "frame": 602,
+        "visible_defenders": 12,
+        "best_contact_score": 0.2889493703842163,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 4.616508960723877
+      },
+      {
+        "frame": 603,
+        "visible_defenders": 11,
+        "best_contact_score": 0.29479390382766724,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 4.60374641418457
+      },
+      {
+        "frame": 604,
+        "visible_defenders": 11,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.35209304094314575,
+        "raider_to_endline": 4.593699932098389
+      },
+      {
+        "frame": 605,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.35582682490348816,
+        "raider_to_endline": 4.585929870605469
+      },
+      {
+        "frame": 606,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.35944700241088867,
+        "raider_to_endline": 4.5813703536987305
+      },
+      {
+        "frame": 607,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.3596183657646179,
+        "raider_to_endline": 4.579057216644287
+      },
+      {
+        "frame": 608,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.36126798391342163,
+        "raider_to_endline": 4.576951503753662
+      },
+      {
+        "frame": 609,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.36325153708457947,
+        "raider_to_endline": 4.575012683868408
+      },
+      {
+        "frame": 610,
+        "visible_defenders": 9,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.3649081885814667,
+        "raider_to_endline": 4.572330474853516
+      },
+      {
+        "frame": 611,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.36918821930885315,
+        "raider_to_endline": 4.568724155426025
+      },
+      {
+        "frame": 612,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.37405428290367126,
+        "raider_to_endline": 4.566169261932373
+      },
+      {
+        "frame": 613,
+        "visible_defenders": 11,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.37826454639434814,
+        "raider_to_endline": 4.560990810394287
+      },
+      {
+        "frame": 614,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.38087403774261475,
+        "raider_to_endline": 4.554980278015137
+      },
+      {
+        "frame": 615,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.38508856296539307,
+        "raider_to_endline": 4.544965744018555
+      },
+      {
+        "frame": 616,
+        "visible_defenders": 11,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.39698001742362976,
+        "raider_to_endline": 4.527225494384766
+      },
+      {
+        "frame": 617,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4102223217487335,
+        "raider_to_endline": 4.505730152130127
+      },
+      {
+        "frame": 618,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4220367670059204,
+        "raider_to_endline": 4.476500988006592
+      },
+      {
+        "frame": 619,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4327160120010376,
+        "raider_to_endline": 4.443485260009766
+      },
+      {
+        "frame": 620,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.44168779253959656,
+        "raider_to_endline": 4.410148620605469
+      },
+      {
+        "frame": 621,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4470263123512268,
+        "raider_to_endline": 4.380634307861328
+      },
+      {
+        "frame": 622,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.44419997930526733,
+        "raider_to_endline": 4.358572959899902
+      },
+      {
+        "frame": 623,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4481891989707947,
+        "raider_to_endline": 4.343463897705078
+      },
+      {
+        "frame": 624,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4573058485984802,
+        "raider_to_endline": 4.331906318664551
+      },
+      {
+        "frame": 625,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.46782186627388,
+        "raider_to_endline": 4.321596145629883
+      },
+      {
+        "frame": 626,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.4826824367046356,
+        "raider_to_endline": 4.307885646820068
+      },
+      {
+        "frame": 627,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.5006753206253052,
+        "raider_to_endline": 4.289909362792969
+      },
+      {
+        "frame": 628,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.5159858465194702,
+        "raider_to_endline": 4.268928527832031
+      },
+      {
+        "frame": 629,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.5218813419342041,
+        "raider_to_endline": 4.255184650421143
+      },
+      {
+        "frame": 630,
+        "visible_defenders": 10,
+        "best_contact_score": 0.29579307635625196,
+        "best_containment_score": 0.5223724246025085,
+        "raider_to_endline": 4.243818283081055
+      },
+      {
+        "frame": 631,
+        "visible_defenders": 10,
+        "best_contact_score": 0.1710642476876576,
+        "best_containment_score": 0.511195957660675,
+        "raider_to_endline": 4.233478546142578
+      },
+      {
+        "frame": 632,
+        "visible_defenders": 10,
+        "best_contact_score": 0.1710642476876576,
+        "best_containment_score": 0.5053707957267761,
+        "raider_to_endline": 4.222399711608887
+      },
+      {
+        "frame": 633,
+        "visible_defenders": 10,
+        "best_contact_score": 0.1710642476876576,
+        "best_containment_score": 0.5106251239776611,
+        "raider_to_endline": 4.203352928161621
+      },
+      {
+        "frame": 634,
+        "visible_defenders": 10,
+        "best_contact_score": 0.17699361840883887,
+        "best_containment_score": 0.5255060791969299,
+        "raider_to_endline": 4.178434371948242
+      },
+      {
+        "frame": 635,
+        "visible_defenders": 10,
+        "best_contact_score": 0.24654598037401831,
+        "best_containment_score": 0.5463528633117676,
+        "raider_to_endline": 4.146427631378174
+      },
+      {
+        "frame": 636,
+        "visible_defenders": 10,
+        "best_contact_score": 0.3070081373055775,
+        "best_containment_score": 0.5617442727088928,
+        "raider_to_endline": 4.116433143615723
+      },
+      {
+        "frame": 637,
+        "visible_defenders": 10,
+        "best_contact_score": 0.34629405538241065,
+        "best_containment_score": 0.5666146278381348,
+        "raider_to_endline": 4.095987319946289
+      },
+      {
+        "frame": 638,
+        "visible_defenders": 10,
+        "best_contact_score": 0.36641563971837354,
+        "best_containment_score": 0.559424877166748,
+        "raider_to_endline": 4.085084915161133
+      },
+      {
+        "frame": 639,
+        "visible_defenders": 10,
+        "best_contact_score": 0.3766591946283976,
+        "best_containment_score": 0.5495394468307495,
+        "raider_to_endline": 4.077888488769531
+      },
+      {
+        "frame": 640,
+        "visible_defenders": 10,
+        "best_contact_score": 0.3771945436795552,
+        "best_containment_score": 0.5383042097091675,
+        "raider_to_endline": 4.07374382019043
+      },
+      {
+        "frame": 641,
+        "visible_defenders": 10,
+        "best_contact_score": 0.3842945496241251,
+        "best_containment_score": 0.5358313322067261,
+        "raider_to_endline": 4.061217784881592
+      },
+      {
+        "frame": 642,
+        "visible_defenders": 10,
+        "best_contact_score": 0.40268809596697486,
+        "best_containment_score": 0.5444483160972595,
+        "raider_to_endline": 4.043298721313477
+      },
+      {
+        "frame": 643,
+        "visible_defenders": 10,
+        "best_contact_score": 0.4280817608038584,
+        "best_containment_score": 0.5800571441650391,
+        "raider_to_endline": 4.022127151489258
+      },
+      {
+        "frame": 644,
+        "visible_defenders": 10,
+        "best_contact_score": 0.46377401550610853,
+        "best_containment_score": 0.5927677750587463,
+        "raider_to_endline": 3.9952030181884766
+      },
+      {
+        "frame": 645,
+        "visible_defenders": 10,
+        "best_contact_score": 0.495828499396642,
+        "best_containment_score": 0.6226351261138916,
+        "raider_to_endline": 3.9699838161468506
+      },
+      {
+        "frame": 646,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5118335386117299,
+        "best_containment_score": 0.6305279731750488,
+        "raider_to_endline": 3.955091714859009
+      },
+      {
+        "frame": 647,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5219119389851887,
+        "best_containment_score": 0.6328691244125366,
+        "raider_to_endline": 3.9445443153381348
+      },
+      {
+        "frame": 648,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.6265614032745361,
+        "raider_to_endline": 3.940328359603882
+      },
+      {
+        "frame": 649,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.6103305220603943,
+        "raider_to_endline": 3.9409003257751465
+      },
+      {
+        "frame": 650,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.5992619395256042,
+        "raider_to_endline": 3.9375288486480713
+      },
+      {
+        "frame": 651,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.5923702120780945,
+        "raider_to_endline": 3.9327075481414795
+      },
+      {
+        "frame": 652,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.5955109596252441,
+        "raider_to_endline": 3.921292543411255
+      },
+      {
+        "frame": 653,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.6036980748176575,
+        "raider_to_endline": 3.9068374633789062
+      },
+      {
+        "frame": 654,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5235970119635264,
+        "best_containment_score": 0.6286666989326477,
+        "raider_to_endline": 3.888599157333374
+      },
+      {
+        "frame": 655,
+        "visible_defenders": 10,
+        "best_contact_score": 0.5366094013055165,
+        "best_containment_score": 0.6796867251396179,
+        "raider_to_endline": 3.862898349761963
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.6688406467437744,
+      "avg_factor_confidence": 0.44785973186375055,
+      "peak_window_pair_score": 0.6126932038293098,
+      "peak_window_line_score": 0.0,
+      "peak_window_containment": 0.6796867251396179,
+      "visible_defenders": 10
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        13,
+        2,
+        8,
+        9
+      ],
+      "global_context": {
+        "visible_players": 11,
+        "visible_defenders": 10,
+        "raider_in_active_graph": true,
+        "max_influence": 66.74331800615582,
+        "mean_defender_depth": 2.7515358924865723,
+        "defender_width_span": 8.265825271606445,
+        "best_contact_score": 0.5366094013055165,
+        "best_containment_score": 0.6796867251396179,
+        "raider_to_endline": 3.862898349761963
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "NO_TOUCH",
+  "notes": ""
+}

@@ -1,0 +1,98 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_BAULK_TOUCH",
+    "event_family": "HLI",
+    "frame": 151,
+    "window_start": 140,
+    "window_end": 161,
+    "core_window_start": 150,
+    "core_window_end": 151,
+    "subject": 7,
+    "object": "BAULK",
+    "line_name": "BAULK",
+    "confidence": 0.6574468493461609,
+    "factor_confidence": 0.5,
+    "requires_visual_confirmation": false
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_BAULK_TOUCH",
+    "event_family": "HLI",
+    "subject": 7,
+    "object": "BAULK",
+    "line_name": "BAULK",
+    "window_frames": [
+      140,
+      141,
+      142,
+      143,
+      144,
+      145,
+      146,
+      147,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161
+    ],
+    "core_frames": [
+      150,
+      151
+    ],
+    "temporal_trace": [
+      {
+        "frame": 150,
+        "visible_defenders": 6,
+        "best_contact_score": 0.08836454153060913,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 2.940396547317505
+      },
+      {
+        "frame": 151,
+        "visible_defenders": 6,
+        "best_contact_score": 0.0574491024017334,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 2.922135353088379
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.7624114155769348,
+      "avg_factor_confidence": 0.5,
+      "peak_window_pair_score": 0.37364727759394845,
+      "peak_window_line_score": 0.8018311600426673,
+      "peak_window_containment": 0.0,
+      "visible_defenders": 6
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        8,
+        2,
+        3,
+        7
+      ],
+      "global_context": {
+        "visible_players": 7,
+        "visible_defenders": 6,
+        "raider_in_active_graph": true,
+        "max_influence": 6.464818156925896,
+        "mean_defender_depth": 2.7799301147460938,
+        "defender_width_span": 7.470742702484131,
+        "best_contact_score": 0.0574491024017334,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 2.922135353088379
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "",
+  "notes": ""
+}

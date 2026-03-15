@@ -58,8 +58,13 @@ class ConfirmedInteractionReportBuilder:
             for _ in range(int(fps)):
                 writer.write(title_card)
 
-            for frame in segment["frames"]:
-                writer.write(frame)
+            classifier_card = self._build_classifier_card(frame_size, event)
+            if classifier_card is not None:
+                for _ in range(max(10, int(fps * 0.75))):
+                    writer.write(classifier_card)
+
+            for frame_idx, frame in segment["raw_frames"]:
+                writer.write(self._annotate_frame(frame, event, frame_idx))
 
         writer.release()
         return True
@@ -75,19 +80,19 @@ class ConfirmedInteractionReportBuilder:
                 remaining.append(event)
                 continue
 
-            segment_frames = []
+            raw_frames = []
             classifier_frames = []
             for frame_idx in range(event["window_start"], event["window_end"] + 1):
                 frame = frame_map.get(frame_idx)
                 if frame is None:
                     continue
                 classifier_frames.append(frame.copy())
-                segment_frames.append(self._annotate_frame(frame, event, frame_idx))
+                raw_frames.append((frame_idx, frame.copy()))
 
-            if segment_frames:
+            if raw_frames:
                 self.segments.append({
                     "event": event,
-                    "frames": segment_frames,
+                    "raw_frames": raw_frames,
                 })
                 self.classifier_inputs.append({
                     "event": event,
@@ -166,7 +171,7 @@ class ConfirmedInteractionReportBuilder:
             valid_prob = classifier_result["probabilities"].get("valid", 0.0)
             cv2.putText(
                 annotated,
-                f"Classifier: {classifier_result['predicted_label']} | Valid {valid_prob:.2f}",
+                f"Model: {classifier_result.get('model_name', 'classifier')} | {classifier_result['predicted_label']} | Valid {valid_prob:.2f}",
                 (32, classifier_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
@@ -245,4 +250,64 @@ class ConfirmedInteractionReportBuilder:
                 (120, 220, 255) if classifier_result.get("guaranteed") else (210, 210, 210),
                 2,
             )
+        return card
+
+    def _build_classifier_card(self, frame_size, event):
+        classifier_result = event.get("classifier_result")
+        if not classifier_result:
+            return None
+
+        width, height = frame_size
+        card = np.zeros((height, width, 3), dtype=np.uint8)
+        card[:] = (12, 20, 28)
+
+        valid_prob = classifier_result["probabilities"].get("valid", 0.0)
+        invalid_prob = classifier_result["probabilities"].get("invalid", 0.0)
+        uncertain_prob = classifier_result["probabilities"].get("uncertain", 0.0)
+
+        cv2.putText(
+            card,
+            "Visual Touch Confirmation",
+            (40, 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (120, 220, 255),
+            2,
+        )
+        cv2.putText(
+            card,
+            f"Model: {classifier_result.get('model_name', 'classifier')}",
+            (40, 145),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2,
+        )
+        cv2.putText(
+            card,
+            f"Decision: {classifier_result['predicted_label']}",
+            (40, 195),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.95,
+            (0, 255, 200) if classifier_result.get("guaranteed") else (255, 220, 120),
+            2,
+        )
+        cv2.putText(
+            card,
+            f"Valid {valid_prob:.2f} | Invalid {invalid_prob:.2f} | Uncertain {uncertain_prob:.2f}",
+            (40, 245),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (200, 255, 200),
+            2,
+        )
+        cv2.putText(
+            card,
+            "This review is shown before any scoring interpretation.",
+            (40, 300),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (210, 210, 210),
+            2,
+        )
         return card

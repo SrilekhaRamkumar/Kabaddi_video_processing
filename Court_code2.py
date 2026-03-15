@@ -33,7 +33,7 @@ CONF_THRESH = 0.4
 SMOOTH_ALPHA = 0.25 
 MAX_PLAYERS = 8
 MAX_AGE=200
-MODEL1 = "yolov8n.pt"
+MODEL1 = "models/yolov8n.pt"
 cursor_court_pos = None
 LINE_MARGIN = 0.6 
 proposal_engine = InteractionProposalEngine()
@@ -125,7 +125,7 @@ for x in [0.75, 9.25]:
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 if device == "cpu":
-    MODEL1="yolov8n.pt"
+    MODEL1="models/yolov8n.pt"
 print("Device used: ",device)
 model = YOLO(MODEL1).to(device)
 # model = RTDETR("rtdetr-l.pt").to(device)
@@ -184,12 +184,10 @@ canvas_w = vis_w + COURT_W + GRAPH_W
 canvas_h = max(vis_h, COURT_H, GRAPH_H)
 
 if os.path.exists(output_filename):
-    print(f"Playback only: {output_filename} already exists. Skipping recording.")
-    out = None 
-else:
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
-    print(f"Recording to: {output_filename}")
+    os.remove(output_filename)
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
+print(f"Recording to: {output_filename}")
 
 def mouse_tracker(event, x, y, flags, param):
     global cursor_court_pos
@@ -612,6 +610,8 @@ print("Total number of Interactions: ", INTERACTION_COUNT)
 if out is not None:
     out.release()
 if report_builder.has_segments():
+    if os.path.exists(report_output_filename):
+        os.remove(report_output_filename)
     wrote_report = report_builder.write_video(report_output_filename, 30.0, (canvas_w, canvas_h))
     if wrote_report:
         print(f"Confirmed interaction report saved to: {report_output_filename}")

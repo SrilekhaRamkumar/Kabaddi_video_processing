@@ -45,26 +45,79 @@ class ConfirmedInteractionReportBuilder:
             if not self.segments:
                 return False
 
-        writer = cv2.VideoWriter(
-            output_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            frame_size,
-        )
+        # H.264 encoders commonly require even dimensions. If we pass odd sizes, OpenCV may
+        # fall back to `mp4v` or produce an unplayable file.
+        width, height = frame_size
+        width = int(width)
+        height = int(height)
+        if width % 2:
+            width += 1
+        if height % 2:
+            height += 1
+        target_size = (width, height)
+
+        def _pad_to_target(bgr):
+            h, w = bgr.shape[:2]
+            if (w, h) == target_size:
+                return bgr
+            # Crop if somehow larger, else pad on right/bottom.
+            out = bgr[: target_size[1], : target_size[0]].copy()
+            oh, ow = out.shape[:2]
+            pad_r = max(0, target_size[0] - ow)
+            pad_b = max(0, target_size[1] - oh)
+            if pad_r or pad_b:
+                out = cv2.copyMakeBorder(out, 0, pad_b, 0, pad_r, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            return out
+
+        # Prefer browser-friendly MP4 codecs if available on this machine.
+        # On Windows, force MSMF to avoid FFmpeg's OpenH264 DLL dependency.
+        writer = None
+        candidates = [
+            ("msmf", getattr(cv2, "CAP_MSMF", 0), "H264"),
+            ("msmf", getattr(cv2, "CAP_MSMF", 0), "avc1"),
+            ("any", 0, "mp4v"),
+        ]
+        for _, api, fourcc in candidates:
+            candidate = cv2.VideoWriter(
+                output_path,
+                api,
+                cv2.VideoWriter_fourcc(*fourcc),
+                fps,
+                target_size,
+            )
+            if candidate.isOpened():
+                writer = candidate
+                break
+            candidate.release()
+
+        if writer is None:
+            writer = cv2.VideoWriter(
+                output_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                fps,
+                target_size,
+            )
+            if not writer.isOpened():
+                try:
+                    writer.release()
+                except Exception:
+                    pass
+                return False
 
         for idx, segment in enumerate(self.segments, start=1):
             event = segment["event"]
-            title_card = self._build_title_card(frame_size, event, idx, len(self.segments))
+            title_card = _pad_to_target(self._build_title_card(target_size, event, idx, len(self.segments)))
             for _ in range(int(fps)):
                 writer.write(title_card)
 
-            classifier_card = self._build_classifier_card(frame_size, event)
+            classifier_card = self._build_classifier_card(target_size, event)
             if classifier_card is not None:
+                classifier_card = _pad_to_target(classifier_card)
                 for _ in range(max(10, int(fps * 0.75))):
                     writer.write(classifier_card)
 
             for frame_idx, frame in segment["raw_frames"]:
-                writer.write(self._annotate_frame(frame, event, frame_idx))
+                writer.write(_pad_to_target(self._annotate_frame(frame, event, frame_idx)))
 
         writer.release()
         return True

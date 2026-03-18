@@ -62,14 +62,60 @@ class ConfirmedWindowDatasetExporter:
 
     def _write_clip(self, clip_path, frames):
         height, width = frames[0].shape[:2]
-        writer = cv2.VideoWriter(
-            clip_path,
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            self.fps,
-            (width, height),
-        )
+
+        # H.264 encoders often require even dimensions. If the incoming frames are odd-sized,
+        # pad them so we can still write a browser-playable MP4.
+        target_w = int(width) + (int(width) % 2)
+        target_h = int(height) + (int(height) % 2)
+
+        def _pad_to_target(bgr):
+            h, w = bgr.shape[:2]
+            if (w, h) == (target_w, target_h):
+                return bgr
+            out = bgr[:target_h, :target_w].copy()
+            oh, ow = out.shape[:2]
+            pad_r = max(0, target_w - ow)
+            pad_b = max(0, target_h - oh)
+            if pad_r or pad_b:
+                out = cv2.copyMakeBorder(out, 0, pad_b, 0, pad_r, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            return out
+
+        # Prefer a browser-friendly codec when available (H.264 in MP4).
+        # On Windows, force MSMF to avoid FFmpeg's OpenH264 DLL dependency.
+        writer = None
+        candidates = [
+            ("msmf", getattr(cv2, "CAP_MSMF", 0), "H264"),
+            ("msmf", getattr(cv2, "CAP_MSMF", 0), "avc1"),
+            ("any", 0, "mp4v"),
+        ]
+        for _, api, fourcc in candidates:
+            candidate = cv2.VideoWriter(
+                clip_path,
+                api,
+                cv2.VideoWriter_fourcc(*fourcc),
+                self.fps,
+                (target_w, target_h),
+            )
+            if candidate.isOpened():
+                writer = candidate
+                break
+            candidate.release()
+
+        if writer is None:
+            writer = cv2.VideoWriter(
+                clip_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                self.fps,
+                (target_w, target_h),
+            )
+            if not writer.isOpened():
+                try:
+                    writer.release()
+                except Exception:
+                    pass
+                return
         for frame in frames:
-            writer.write(frame)
+            writer.write(_pad_to_target(frame))
         writer.release()
 
     def _write_payload(self, payload_path, classifier_input):

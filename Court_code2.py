@@ -4,7 +4,9 @@ from ultralytics import YOLO
 from ultralytics import RTDETR
 import torch
 import os
+import json
 import hashlib
+import sys
 from classifier_bridge import ConfirmedWindowClassifierBridge
 from dataset_exporter import ConfirmedWindowDatasetExporter
 from kabaddi_afgn_reasoning import KabaddiAFGNEngine
@@ -22,6 +24,19 @@ from video_stream import VideoStream
 # ======================================================
 
 VIDEO_PATH = "Videos/Cam1/raid1.mp4"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def resolve_path(path):
+    """Resolve relative paths against this script's directory."""
+    if path is None:
+        return None
+    return path if os.path.isabs(path) else os.path.join(BASE_DIR, path)
+
+VIDEO_PATH = resolve_path(VIDEO_PATH)
+
+# Stable identifier for the current processing run (also used by the API).
+path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
+video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
 
 # ======================================================
 # CONFIG (RESTORED)
@@ -29,6 +44,9 @@ VIDEO_PATH = "Videos/Cam1/raid1.mp4"
 
 DISPLAY_SCALE = 0.5
 FPS_DELAY = 1
+# Set to True only if you want OpenCV windows on the backend machine.
+# For the web dashboard flow, keep this False to run headless.
+SHOW_BACKEND_WINDOWS = False
 CONF_THRESH = 0.4
 SMOOTH_ALPHA = 0.25 
 MAX_PLAYERS = 8
@@ -36,13 +54,13 @@ MAX_AGE=200
 MODEL1 = "models/yolov8n.pt"
 cursor_court_pos = None
 LINE_MARGIN = 0.6 
-proposal_engine = InteractionProposalEngine()
-graph_engine = ActiveFactorGraphNetwork(top_k=4)
-action_engine = KabaddiAFGNEngine()
-candidate_manager = TemporalInteractionCandidateManager()
-report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)
-classifier_bridge = ConfirmedWindowClassifierBridge()
-dataset_exporter = ConfirmedWindowDatasetExporter(os.path.join("Videos", "classifier_dataset"), fps=30.0)
+proposal_engine = InteractionProposalEngine()  # interaction_graph.InteractionProposalEngine
+graph_engine = ActiveFactorGraphNetwork(top_k=4)  # interaction_graph.ActiveFactorGraphNetwork
+action_engine = KabaddiAFGNEngine()  # kabaddi_afgn_reasoning.KabaddiAFGNEngine
+candidate_manager = TemporalInteractionCandidateManager()  # temporal_events.TemporalInteractionCandidateManager
+report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)  # report_video.ConfirmedInteractionReportBuilder
+classifier_bridge = ConfirmedWindowClassifierBridge()  # classifier_bridge.ConfirmedWindowClassifierBridge
+dataset_exporter = ConfirmedWindowDatasetExporter(os.path.join(BASE_DIR, "Videos", "classifier_dataset"), fps=30.0)  # dataset_exporter.ConfirmedWindowDatasetExporter
 
 # IMAGE-SPACE COURT LINES
 lines = {
@@ -122,6 +140,107 @@ for x in [0.75, 9.25]:
 # MAIN LOOP
 # ======================================================
 
+# ======================================================
+# LIVE STREAMING API (FASTAPI)
+# ======================================================
+import time
+import queue
+import threading
+
+LIVE_FRAME_QUEUE = queue.Queue(maxsize=5)
+LIVE_STATE_QUEUE = queue.Queue(maxsize=5)
+LIVE_INPUT_QUEUE = queue.Queue(maxsize=5)
+LIVE_LOG_QUEUE = queue.Queue(maxsize=300)
+_API_THREAD = None
+_USER_QUIT = False
+
+try:
+    import msvcrt  # Windows-only (non-blocking keypress)
+except Exception:
+    msvcrt = None
+
+
+def _log_enqueue(line: str, stream: str = "stdout"):
+    payload = {
+        "t": time.time(),
+        "stream": stream,
+        "line": str(line),
+    }
+    if LIVE_LOG_QUEUE.full():
+        try:
+            LIVE_LOG_QUEUE.get_nowait()
+        except queue.Empty:
+            pass
+    try:
+        LIVE_LOG_QUEUE.put_nowait(payload)
+    except queue.Full:
+        pass
+
+
+class _TeeStream:
+    def __init__(self, inner, stream_name: str):
+        self._inner = inner
+        self._name = stream_name
+        self._buf = ""
+
+    def write(self, s):
+        try:
+            self._inner.write(s)
+        except Exception:
+            pass
+
+        try:
+            self._buf += str(s)
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():
+                    _log_enqueue(line, stream=self._name)
+        except Exception:
+            # Never break the pipeline because of logging.
+            pass
+
+    def flush(self):
+        try:
+            if self._buf.strip():
+                _log_enqueue(self._buf, stream=self._name)
+            self._buf = ""
+        except Exception:
+            pass
+        try:
+            self._inner.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        try:
+            return bool(self._inner.isatty())
+        except Exception:
+            return False
+
+def start_api_server():
+    import uvicorn
+    import api_server
+    api_server.app.state.frame_queue = LIVE_FRAME_QUEUE
+    api_server.app.state.state_queue = LIVE_STATE_QUEUE
+    api_server.app.state.input_queue = LIVE_INPUT_QUEUE
+    api_server.app.state.log_queue = LIVE_LOG_QUEUE
+    api_server.app.state.run_id = path_hash
+    api_server.app.state.video_stem = video_stem
+    uvicorn.run(api_server.app, host="0.0.0.0", port=8000, log_level="error")
+
+# Keep the API server running while the main script is alive (during processing and
+# while we wait at the "Type q to quit" prompt). When the main script exits, the
+# daemon server thread will stop automatically.
+_API_THREAD = threading.Thread(target=start_api_server, daemon=True)
+_API_THREAD.start()
+
+# Mirror stdout/stderr into LIVE_LOG_QUEUE so the frontend can visualize backend output.
+try:
+    sys.stdout = _TeeStream(sys.stdout, "stdout")
+    sys.stderr = _TeeStream(sys.stderr, "stderr")
+except Exception:
+    pass
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 if device == "cpu":
@@ -130,11 +249,12 @@ print("Device used: ",device)
 model = YOLO(MODEL1).to(device)
 # model = RTDETR("rtdetr-l.pt").to(device)
 
-vs = VideoStream(VIDEO_PATH).start()
+vs = VideoStream(VIDEO_PATH).start()  # video_stream.VideoStream.start
 prev_gray = None
 NEXT_ID = 0
 GALLERY = {}
 frame_idx = 0
+last_action_results = None
 
 # ======================================================
 # RAIDER IDENTIFICATION (Single-side logic)
@@ -162,31 +282,67 @@ def mouse_tracker(event, x, y, flags, param):
         mapped = cv2.perspectiveTransform(pt, H)[0][0]
         cursor_court_pos = (mapped[0], mapped[1])
 
-cv2.namedWindow("Video (Integrated)")
-cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
-cv2.namedWindow("Half Court (2D)")
-
-
-
-cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
+if SHOW_BACKEND_WINDOWS:
+    cv2.namedWindow("Video (Integrated)")
+    cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
+    cv2.namedWindow("Half Court (2D)")
+    cv2.namedWindow("Interaction Graph")
+    cv2.setMouseCallback("Video (Integrated)", mouse_tracker)
 # ---------------------------------------
 
 
-path_hash = hashlib.md5(VIDEO_PATH.encode()).hexdigest()[:8]
-video_stem = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
-output_filename = f"Videos/processed_{video_stem}_{path_hash}.mp4"
-report_output_filename = f"Videos/confirmed_report_{video_stem}_{path_hash}.mp4"
+output_filename = os.path.join(BASE_DIR, "Videos", f"processed_{video_stem}_{path_hash}.mp4")
+report_output_filename = os.path.join(BASE_DIR, "Videos", f"confirmed_report_{video_stem}_{path_hash}.mp4")
 
 
-vis_w = int(1920 * DISPLAY_SCALE)
-vis_h = int(1080 * DISPLAY_SCALE)
-canvas_w = vis_w + COURT_W + GRAPH_W
-canvas_h = max(vis_h, COURT_H, GRAPH_H)
+def _even(n: int) -> int:
+    n = int(n)
+    return n if n % 2 == 0 else n + 1
+
+
+vis_w = _even(int(1920 * DISPLAY_SCALE))
+vis_h = _even(int(1080 * DISPLAY_SCALE))
+canvas_w = _even(vis_w + COURT_W + GRAPH_W)
+canvas_h = _even(max(vis_h, COURT_H, GRAPH_H))
 
 if os.path.exists(output_filename):
     os.remove(output_filename)
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
+# Prefer browser-friendly MP4 by explicitly selecting MSMF (Windows) for H.264.
+def _open_video_writer(path, fps, size):
+    # Try H.264 via MSMF first to avoid FFmpeg's OpenH264 DLL dependency.
+    candidates = [
+        ("msmf", getattr(cv2, "CAP_MSMF", 0), "H264"),
+        ("msmf", getattr(cv2, "CAP_MSMF", 0), "avc1"),
+        ("any", 0, "mp4v"),
+    ]
+    for _, api, tag in candidates:
+        try:
+            writer = cv2.VideoWriter(
+                path,
+                api,
+                cv2.VideoWriter_fourcc(*tag),
+                fps,
+                size,
+            )
+        except Exception:
+            continue
+        if writer.isOpened():
+            return writer
+        writer.release()
+    return None
+
+out = _open_video_writer(output_filename, 30.0, (canvas_w, canvas_h))
+if out is None:
+    out = cv2.VideoWriter(output_filename, fourcc, 30.0, (canvas_w, canvas_h))
+if out is not None and not out.isOpened():
+    # Avoid producing a 0-byte/unplayable file that the frontend will try to play.
+    try:
+        out.release()
+    except Exception:
+        pass
+    out = None
+    print(f"[WARN] Could not open VideoWriter for: {output_filename} (will not record processed video)")
 print(f"Recording to: {output_filename}")
 
 def mouse_tracker(event, x, y, flags, param):
@@ -256,6 +412,16 @@ last_vis = None
 last_mat = None
 
 while vs.running():
+    # Optional: allow quitting anytime (Windows terminals).
+    if msvcrt is not None:
+        try:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b"q", b"Q"):
+                    _USER_QUIT = True
+                    break
+        except Exception:
+            pass
     global TOTAL_POINTS, CURRENT_RAID_POINTS
     if 'TOTAL_POINTS' not in globals():
         TOTAL_POINTS = 0
@@ -286,13 +452,13 @@ while vs.running():
 
     # 1. OPTICAL FLOW MOTION COMPENSATION
     if prev_gray is not None:
-        apply_optical_flow(prev_gray, gray, GALLERY)
+        apply_optical_flow(prev_gray, gray, GALLERY)  # tracking_pipeline.apply_optical_flow
 
     # 2. YOLO DETECTION
-    detections = run_yolo_detection(model, frame, device, CONF_THRESH)
+    detections = run_yolo_detection(model, frame, device, CONF_THRESH)  # tracking_pipeline.run_yolo_detection
 
     # 3. TRACK PREDICTION & MATCHING
-    matched_tracks, matched_dets = update_tracks(
+    matched_tracks, matched_dets = update_tracks(  # tracking_pipeline.update_tracks
         GALLERY,
         detections,
         gray,
@@ -303,10 +469,10 @@ while vs.running():
     )
 
     # 4. NEW TRACKS & AGING
-    NEXT_ID = add_new_tracks(GALLERY, detections, matched_dets, NEXT_ID, MAX_PLAYERS)
+    NEXT_ID = add_new_tracks(GALLERY, detections, matched_dets, NEXT_ID, MAX_PLAYERS)  # tracking_pipeline.add_new_tracks
 
     # 5. MAT RENDERING & DIRECTION ARROWS
-    render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_AGE)
+    render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_AGE)  # tracking_pipeline.render_gallery
 
     if RAID_ASSIGNMENT_DONE and RAIDER_ID is not None:
         raider_track = GALLERY.get(RAIDER_ID)
@@ -334,7 +500,7 @@ while vs.running():
     # ======================================================
 
     if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx < ASSIGN_FRAME:
-        collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_Y)
+        collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_Y)  # raider_logic.collect_raider_stats
 
 
 
@@ -344,7 +510,7 @@ while vs.running():
     # ======================================================
 
     if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx >= ASSIGN_FRAME:
-        best_id, raid_done, ASSIGN_FRAME = assign_raider(
+        best_id, raid_done, ASSIGN_FRAME = assign_raider(  # raider_logic.assign_raider
             GALLERY,
             RAIDER_STATS,
             frame_idx,
@@ -362,9 +528,9 @@ while vs.running():
     # ======================================================
    
     
-    player_states, active_players = build_player_states(GALLERY)
+    player_states, active_players = build_player_states(GALLERY)  # interaction_logic.build_player_states
     effective_raid_assignment = RAID_ASSIGNMENT_DONE and not RAIDER_EXITED
-    interaction_candidates, touch_confirmed = process_interactions(
+    interaction_candidates, touch_confirmed = process_interactions(  # interaction_logic.process_interactions
         frame_idx,
         GALLERY,
         player_states,
@@ -410,15 +576,15 @@ while vs.running():
      
     
         
-    frame_proposals = proposal_engine.finalize_frame_proposals()
+    frame_proposals = proposal_engine.finalize_frame_proposals()  # interaction_graph.InteractionProposalEngine.finalize_frame_proposals
     scene_graph = None
     if effective_raid_assignment and proposal_engine.candidate_proposals:
-        scene_graph = graph_engine.build_graph(
+        scene_graph = graph_engine.build_graph(  # interaction_graph.ActiveFactorGraphNetwork.build_graph
             proposal_engine.candidate_proposals,
             GALLERY,
             RAIDER_ID
         )
-    confirmed_events = candidate_manager.update(
+    confirmed_events = candidate_manager.update(  # temporal_events.TemporalInteractionCandidateManager.update
         frame_idx,
         frame_proposals,
         player_states,
@@ -509,7 +675,7 @@ while vs.running():
         if effective_raid_assignment and proposal_engine.candidate_proposals:
             # Build the Graph and Encode Features
             if scene_graph is None:
-                scene_graph = graph_engine.build_graph(
+                scene_graph = graph_engine.build_graph(  # interaction_graph.ActiveFactorGraphNetwork.build_graph
                     proposal_engine.candidate_proposals,
                     GALLERY,
                     RAIDER_ID
@@ -523,7 +689,7 @@ while vs.running():
                 print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
 
             # PHASE 2: Action Recognition and Point Calculation
-            action_results = action_engine.process_frame_actions(
+            action_results = action_engine.process_frame_actions(  # kabaddi_afgn_reasoning.KabaddiAFGNEngine.process_frame_actions
                 scene_graph, 
                 proposal_engine.candidate_proposals, 
                 CONFIRMED_EVENT_LOG,
@@ -531,6 +697,7 @@ while vs.running():
                 frame_idx,
                 GALLERY,
             )
+            last_action_results = action_results
             
             # Update global scores
             total_score = action_results['total_points']
@@ -561,7 +728,7 @@ while vs.running():
         proposal_engine.reset_proposals()
 
     recent_graph_events = [event for event in CONFIRMED_EVENT_LOG if frame_idx - event["frame"] <= 15]
-    graph_panel = render_graph_panel(
+    graph_panel = render_graph_panel(  # interaction_graph.render_graph_panel
         scene_graph,
         width=GRAPH_W,
         height=GRAPH_H,
@@ -582,12 +749,215 @@ while vs.running():
     combined_frame[:COURT_H, vis_w:vis_w+COURT_W] = mat
     combined_frame[:GRAPH_H, vis_w+COURT_W:vis_w+COURT_W+GRAPH_W] = graph_panel
 
-    report_builder.add_frame(frame_idx, combined_frame)
-    report_builder.capture_events(confirmed_events)
+    # --- PUSH LIVE DATA TO REACT API ---
+    if LIVE_INPUT_QUEUE.full():
+        try: LIVE_INPUT_QUEUE.get_nowait()
+        except queue.Empty: pass
+    LIVE_INPUT_QUEUE.put(frame.copy())
+
+    if LIVE_FRAME_QUEUE.full():
+        try: LIVE_FRAME_QUEUE.get_nowait()
+        except queue.Empty: pass
+    LIVE_FRAME_QUEUE.put(combined_frame.copy())
+
+    # --- STRUCTURED SNAPSHOTS FOR FRONTEND (non-terminal UI) ---
+    gallery_snapshot = []
+    try:
+        for pid, data in GALLERY.items():
+            state = data["kf"].statePost.flatten().tolist()  # [x, y, vx, vy]
+            m_pos = data.get("display_pos") if data.get("display_pos") else (0.0, 0.0)
+            bb = data.get("last_bbox", (0, 0, 0, 0))
+            feat = data.get("feat")
+            hsv_bins5 = None
+            try:
+                if feat is not None:
+                    # First 5 bins of the 512-D HSV histogram (for quick UI diagnostics).
+                    hsv_bins5 = [float(x) for x in feat[:5]]
+            except Exception:
+                hsv_bins5 = None
+
+            flow_pts = data.get("flow_pts")
+            flow_count = 0
+            try:
+                flow_count = int(len(flow_pts)) if flow_pts is not None else 0
+            except Exception:
+                flow_count = 0
+            gallery_snapshot.append({
+                "id": int(pid),
+                "visible": bool(data.get("age", 0) == 0),
+                "age": int(data.get("age", 0)),
+                "screen_pos": [float(state[0]), float(state[1])],
+                "velocity": [float(state[2]), float(state[3])],
+                "court_pos": [float(m_pos[0]), float(m_pos[1])],
+                "bbox": [int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])],
+                "hsv_bins5": hsv_bins5,
+                "flow_points": flow_count,
+            })
+        gallery_snapshot.sort(key=lambda x: x["id"])
+    except Exception:
+        gallery_snapshot = []
+
+    hhi_live = []
+    hli_live = []
+    try:
+        for p in proposal_engine.candidate_proposals[-120:]:
+            if p.get("type") == "HHI":
+                feats = p.get("features", {}) or {}
+                hhi_live.append({
+                    "frame": int(p.get("frame", frame_idx)),
+                    "S": int(p.get("S")) if p.get("S") is not None else None,
+                    "I": str(p.get("I")),
+                    "O": int(p.get("O")) if p.get("O") is not None else None,
+                    "dist": float(feats.get("dist", 0.0)),
+                    "rel_vel": float(feats.get("rel_vel", 0.0)),
+                })
+            elif p.get("type") == "HLI":
+                feats = p.get("features", {}) or {}
+                hli_live.append({
+                    "frame": int(p.get("frame", frame_idx)),
+                    "S": int(p.get("S")) if p.get("S") is not None else None,
+                    "I": str(p.get("I")),
+                    "O": str(p.get("O")),
+                    "dist": float(feats.get("dist", 0.0)),
+                    "active": bool(feats.get("active", False)),
+                })
+    except Exception:
+        hhi_live, hli_live = [], []
+
+    action_summary = None
+    try:
+        if last_action_results is not None:
+            action_summary = {
+                "points_scored": int(last_action_results.get("points_scored", 0)),
+                "total_points": last_action_results.get("total_points", {}),
+                "raid_ended": bool(last_action_results.get("raid_ended", False)),
+                "accuracy_metrics": last_action_results.get("accuracy_metrics", {}),
+                "actions": last_action_results.get("actions", [])[:10],
+            }
+    except Exception:
+        action_summary = None
+
+    live_state = {
+        "raider_id": RAIDER_ID,
+        "score_attacker": TOTAL_POINTS if TOTAL_POINTS > 0 else 0,
+        "score_defender": abs(TOTAL_POINTS) if TOTAL_POINTS < 0 else 0,
+        "frame_idx": frame_idx,
+        "gallery": gallery_snapshot,
+        "hhi": hhi_live[-25:],
+        "hli": hli_live[-25:],
+        "action_summary": action_summary,
+        "graph": None,
+        "events": [
+            {
+                "id": f"{e.get('type')}|{e.get('frame')}|{e.get('subject')}|{e.get('object')}",
+                "frame": e.get("frame"),
+                "type": e.get("type"),
+                "subject": e.get("subject"),
+                "object": e.get("object"),
+                "conf": round(float(e.get("confidence", 0.0)), 3),
+                "factor_conf": round(float(e.get("factor_confidence", 0.0)), 3),
+                "requires_visual_confirmation": bool(e.get("requires_visual_confirmation", False)),
+                "classifier_label": e.get("classifier_label"),
+                "classifier_valid_prob": round(float(e.get("classifier_valid_prob", 0.0)), 3) if e.get("classifier_valid_prob") is not None else None,
+                "guaranteed_by_classifier": bool(e.get("guaranteed_by_classifier", False)),
+            }
+            for e in CONFIRMED_EVENT_LOG[-5:]  # Send latest 5 events
+        ]
+    }
+
+    # Compact graph payload for frontend rendering (nodes + edges).
+    # This avoids shipping a pre-rendered image and lets React render a 3D graph.
+    if scene_graph and scene_graph.get("nodes"):
+        graph_nodes = []
+        for node in scene_graph.get("nodes", []):
+            spatial = node.get("spatial")
+            if spatial is None:
+                continue
+            graph_nodes.append(
+                {
+                    "id": int(node.get("id")),
+                    "kind": "player",
+                    "role": node.get("role"),
+                    "pos": [float(spatial[0]), float(spatial[1])],
+                    "track_confidence": float(node.get("track_confidence", 0.0)),
+                    "visibility_confidence": float(node.get("visibility_confidence", 0.0)),
+                }
+            )
+
+        # Add static line nodes so line factors can connect to something.
+        line_nodes = [
+            {"id": "LINE_BAULK", "kind": "line", "label": "BAULK", "pos": [5.0, 3.75]},
+            {"id": "LINE_BONUS", "kind": "line", "label": "BONUS", "pos": [5.0, 4.75]},
+            {"id": "LINE_END", "kind": "line", "label": "END_LINE", "pos": [5.0, 6.5]},
+        ]
+        graph_nodes.extend(line_nodes)
+
+        graph_edges = []
+        for factor in scene_graph.get("pair_factors", []):
+            nodes = factor.get("nodes", [])
+            if len(nodes) != 2:
+                continue
+            features = factor.get("features", {}) or {}
+            dist = float(features.get("distance", 0.0))
+            proximity = max(0.0, 1.0 - dist / 1.2)
+            approach = float(features.get("approach_score", 0.0))
+            strength = float(0.5 * proximity + 0.5 * approach)
+            graph_edges.append(
+                {
+                    "source": int(nodes[0]),
+                    "target": int(nodes[1]),
+                    "kind": "pair",
+                    "type": factor.get("type"),
+                    "distance": dist,
+                    "weight": max(0.0, min(1.0, strength)),
+                }
+            )
+
+        for factor in scene_graph.get("line_factors", []):
+            nodes = factor.get("nodes", [])
+            if not nodes:
+                continue
+            line_name = factor.get("line")
+            line_id = {
+                "BAULK": "LINE_BAULK",
+                "BONUS": "LINE_BONUS",
+                "END_LINE": "LINE_END",
+            }.get(line_name)
+            if line_id is None:
+                continue
+            active = bool((factor.get("features", {}) or {}).get("active"))
+            graph_edges.append(
+                {
+                    "source": int(nodes[0]),
+                    "target": line_id,
+                    "kind": "line",
+                    "type": line_name,
+                    "weight": 1.0 if active else 0.35,
+                    "active": active,
+                }
+            )
+
+        live_state["graph"] = {
+            "nodes": graph_nodes,
+            "edges": graph_edges,
+            "meta": {
+                "best_contact_score": float(scene_graph.get("global_context", {}).get("best_contact_score", 0.0)),
+                "best_containment_score": float(scene_graph.get("global_context", {}).get("best_containment_score", 0.0)),
+                "visible_defenders": int(scene_graph.get("global_context", {}).get("visible_defenders", 0)),
+            },
+        }
+    if LIVE_STATE_QUEUE.full():
+        try: LIVE_STATE_QUEUE.get_nowait()
+        except queue.Empty: pass
+    LIVE_STATE_QUEUE.put(live_state)
+    # -----------------------------------
+
+    report_builder.add_frame(frame_idx, combined_frame)  # report_video.ConfirmedInteractionReportBuilder.add_frame
+    report_builder.capture_events(confirmed_events)  # report_video.ConfirmedInteractionReportBuilder.capture_events
     if report_builder.has_classifier_inputs():
-        classifier_inputs = report_builder.consume_classifier_inputs()
-        exported_windows = dataset_exporter.export_batch(classifier_inputs)
-        classifier_results = classifier_bridge.score_batch(classifier_inputs)
+        classifier_inputs = report_builder.consume_classifier_inputs()  # report_video.ConfirmedInteractionReportBuilder.consume_classifier_inputs
+        exported_windows = dataset_exporter.export_batch(classifier_inputs)  # dataset_exporter.ConfirmedWindowDatasetExporter.export_batch
+        classifier_results = classifier_bridge.score_batch(classifier_inputs)  # classifier_bridge.ConfirmedWindowClassifierBridge.score_batch
         apply_classifier_results(CONFIRMED_EVENT_LOG, classifier_results)
         if exported_windows:
             print(f"[DATASET] Exported {len(exported_windows)} confirmed window(s) to Videos/classifier_dataset")
@@ -596,15 +966,20 @@ while vs.running():
     
     if out is not None:
         out.write(combined_frame)
-    cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
-    cv2.imshow("Half Court (2D)", mat)
-    cv2.imshow("Interaction Graph", graph_panel)
-    
-    key = cv2.waitKey(0 if paused else FPS_DELAY)
-    if key & 0xFF == ord('q'):
-        break
-    elif key & 0xFF == ord('p'):
-        paused = not paused
+
+    if SHOW_BACKEND_WINDOWS:
+        cv2.imshow("Video (Integrated)", cv2.resize(vis, None, fx=DISPLAY_SCALE, fy=DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST))
+        cv2.imshow("Half Court (2D)", mat)
+        cv2.imshow("Interaction Graph", graph_panel)
+
+        key = cv2.waitKey(0 if paused else FPS_DELAY)
+        if key & 0xFF == ord('q'):
+            break
+        elif key & 0xFF == ord('p'):
+            paused = not paused
+    else:
+        # Keep a tiny sleep to avoid burning CPU when running headless.
+        time.sleep(max(0.0, float(FPS_DELAY)) / 1000.0)
 
 print("Total number of Interactions: ", INTERACTION_COUNT)
 if out is not None:
@@ -612,7 +987,7 @@ if out is not None:
 if report_builder.has_segments():
     if os.path.exists(report_output_filename):
         os.remove(report_output_filename)
-    wrote_report = report_builder.write_video(report_output_filename, 30.0, (canvas_w, canvas_h))
+    wrote_report = report_builder.write_video(report_output_filename, 30.0, (canvas_w, canvas_h))  # report_video.ConfirmedInteractionReportBuilder.write_video
     if wrote_report:
         print(f"Confirmed interaction report saved to: {report_output_filename}")
     else:
@@ -620,3 +995,49 @@ if report_builder.has_segments():
 else:
     print("No confirmed interaction windows captured for report video.")
 cv2.destroyAllWindows()
+
+# Persist confirmed events so the frontend can show results without reprocessing.
+try:
+    archive_dir = os.path.join(BASE_DIR, "Videos")
+    os.makedirs(archive_dir, exist_ok=True)
+    archive_path = os.path.join(archive_dir, f"confirmed_events_{path_hash}.json")
+    latest_path = os.path.join(archive_dir, "confirmed_events_latest.json")
+    payload = {
+        "video_path": VIDEO_PATH,
+        "path_hash": path_hash,
+        "processed_video": os.path.basename(output_filename),
+        "report_video": os.path.basename(report_output_filename),
+        "events": CONFIRMED_EVENT_LOG,
+    }
+    with open(archive_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    with open(latest_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(f"[ARCHIVE] Wrote confirmed events: {archive_path}")
+except Exception as _exc:
+    print(f"[ARCHIVE] Could not write confirmed events archive: {_exc}")
+
+# After processing ends, detach the live queues so the frontend switches to
+# archive mode, but keep the API server running to serve videos + event logs.
+try:
+    import api_server as _api_server
+
+    _api_server.app.state.frame_queue = None
+    _api_server.app.state.state_queue = None
+    _api_server.app.state.input_queue = None
+except Exception as _exc:
+    print(f"[ARCHIVE] Could not detach live queues from API server: {_exc}")
+
+# Keep the backend alive so the frontend can keep playing the final outputs.
+try:
+    if (not _USER_QUIT) and sys.stdin is not None and sys.stdin.isatty():
+        print("\nBackend is now in ARCHIVE mode (API still running on http://localhost:8000).")
+        while True:
+            cmd = input("Type q to quit: ").strip().lower()
+            if cmd in ("q", "quit", "exit"):
+                break
+except (KeyboardInterrupt, EOFError):
+    pass
+
+if _USER_QUIT:
+    print("[QUIT] User requested quit during processing.")

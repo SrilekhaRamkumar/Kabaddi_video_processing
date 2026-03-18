@@ -43,3 +43,13 @@ Thumbs.db
 # Logs
 # ==========================
 *.log
+
+# ==========================
+# Frontend (Vite/React)
+# ==========================
+kabaddi-frontend/node_modules/
+kabaddi-frontend/dist/
+kabaddi-frontend/.npm-cache/
+kabaddi-frontend/.vite/
+kabaddi-frontend/.env
+kabaddi-frontend/.env.*

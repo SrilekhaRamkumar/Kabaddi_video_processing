@@ -18,7 +18,7 @@ from temporal_events import TemporalInteractionCandidateManager
 from tracking_pipeline import apply_optical_flow, run_yolo_detection, update_tracks, add_new_tracks, render_gallery
 from video_stream import VideoStream
 
-#COMMIT CHECK 15/3
+#COMMIT CHECK 19/3
 # ======================================================
 # PERFORMANCE: THREADED VIDEO READER
 # ======================================================
@@ -121,7 +121,14 @@ H, _ = cv2.findHomography(img_pts, court_pts, cv2.RANSAC, 5.0)
 
 COURT_W, COURT_H = 400, 260
 GRAPH_W, GRAPH_H = 420, 320
-mat_base = np.ones((COURT_H, COURT_W, 3), dtype=np.uint8) * 235
+# Backend-rendered mat background color.
+# (Frontend renders its own transparent SVG mat; this is for the backend MJPEG stream.)
+MAT_TRANSPARENT_BG = False
+mat_base = (
+    np.zeros((COURT_H, COURT_W, 3), dtype=np.uint8)
+    if MAT_TRANSPARENT_BG
+    else (np.ones((COURT_H, COURT_W, 3), dtype=np.uint8) * 255)
+)
 
 def court_to_pixel(x, y):
     px = int(x / 10 * COURT_W)
@@ -129,12 +136,14 @@ def court_to_pixel(x, y):
     return px, py
 
 # Draw static mat labels/lines
-cv2.rectangle(mat_base, court_to_pixel(0, 0), court_to_pixel(10, 6.5), (0, 0, 0), 2)
+ink = (220, 220, 220) if MAT_TRANSPARENT_BG else (0, 0, 0)
+label_ink = (200, 200, 200) if MAT_TRANSPARENT_BG else (60, 60, 60)
+cv2.rectangle(mat_base, court_to_pixel(0, 0), court_to_pixel(10, 6.5), ink, 2)
 for y, name in [(3.75, "baulk"), (4.75, "bonus")]:
-    cv2.line(mat_base, court_to_pixel(0, y), court_to_pixel(10, y), (0, 0, 0), 1)
-    cv2.putText(mat_base, name, (8, court_to_pixel(0, y)[1]-4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)
+    cv2.line(mat_base, court_to_pixel(0, y), court_to_pixel(10, y), ink, 1)
+    cv2.putText(mat_base, name, (8, court_to_pixel(0, y)[1]-4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_ink, 1)
 for x in [0.75, 9.25]:
-    cv2.line(mat_base, court_to_pixel(x, 0), court_to_pixel(x, 6.5), (0, 0, 0), 1)
+    cv2.line(mat_base, court_to_pixel(x, 0), court_to_pixel(x, 6.5), ink, 1)
 
 # ======================================================
 # MAIN LOOP
@@ -153,6 +162,7 @@ LIVE_INPUT_QUEUE = queue.Queue(maxsize=5)
 LIVE_LOG_QUEUE = queue.Queue(maxsize=300)
 _API_THREAD = None
 _USER_QUIT = False
+_USER_RESTART = False
 
 try:
     import msvcrt  # Windows-only (non-blocking keypress)
@@ -398,6 +408,74 @@ touch_confirmed = False
 INTERACTION_WINDOW = 20  # frames for future investigation
 INTERACTION_COUNT = 0
 
+# -------------------------------------------------------------------
+# Per-frame court coordinate history (for confirmed-event archiving)
+# -------------------------------------------------------------------
+COURT_META = {
+    "court_w": 10.0,
+    "court_h": 6.5,
+    "baulk_y": 3.75,
+    "bonus_y": 4.75,
+    "lobby_left_x": 0.75,
+    "lobby_right_x": 9.25,
+    "camera": ACTIVE_CAMERA,
+    # Planar homography used to map screen -> court coords (3x3). Useful for future
+    # camera-perspective matching in the 3D replay (best-effort without full intrinsics).
+    "homography": H.tolist() if hasattr(H, "tolist") else None,
+}
+_FRAME_HISTORY_KEEP = 2000
+_FRAME_GALLERY_HISTORY = {}
+_CONFIRMED_EVENT_MAT_ARCHIVE = {}
+
+def _snapshot_frame_for_mat(frame_idx, gallery, raider_id):
+    players = []
+    try:
+        for pid, data in gallery.items():
+            m_pos = data.get("display_pos")
+            if m_pos is None:
+                continue
+            bb = data.get("last_bbox", (0, 0, 0, 0))
+            players.append({
+                "id": int(pid),
+                "visible": bool(data.get("age", 0) == 0),
+                "court_pos": [float(m_pos[0]), float(m_pos[1])],
+                "bbox": [int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])],
+            })
+        players.sort(key=lambda x: x["id"])
+    except Exception:
+        players = []
+    return {
+        "frame": int(frame_idx),
+        "raider_id": int(raider_id) if raider_id is not None else None,
+        "players": players,
+    }
+
+def _event_key(event):
+    return (
+        str(event.get("type")),
+        int(event.get("frame", -1)),
+        str(event.get("subject")),
+        str(event.get("object")),
+    )
+
+def _archive_event_mat_window(event):
+    """
+    Store the per-frame court coordinate history for the event's temporal window.
+    This is merged into the on-disk archive JSON at the end (to keep live objects small).
+    """
+    try:
+        window_start = int(event.get("window_start", event.get("frame", 0)))
+        window_end = int(event.get("window_end", event.get("frame", window_start)))
+        mat_window = []
+        for fi in range(window_start, window_end + 1):
+            snap = _FRAME_GALLERY_HISTORY.get(int(fi))
+            if snap is None:
+                continue
+            mat_window.append(snap)
+        _CONFIRMED_EVENT_MAT_ARCHIVE[_event_key(event)] = mat_window
+    except Exception:
+        pass
+
 MIDDLE_Y = 0.0
 BAULK_Y = 3.75
 BONUS_Y = 4.75
@@ -419,6 +497,9 @@ while vs.running():
                 ch = msvcrt.getch()
                 if ch in (b"q", b"Q"):
                     _USER_QUIT = True
+                    break
+                if ch in (b"n", b"N"):
+                    _USER_RESTART = True
                     break
         except Exception:
             pass
@@ -447,8 +528,9 @@ while vs.running():
             cv2.circle(mat, (mx, my), 9, (0, 0, 0), 1)
 
     # Display current scores on mat
-    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    score_ink = (230, 230, 230) if MAT_TRANSPARENT_BG else (0, 0, 0)
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, score_ink, 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, score_ink, 2)
 
     # 1. OPTICAL FLOW MOTION COMPENSATION
     if prev_gray is not None:
@@ -473,6 +555,18 @@ while vs.running():
 
     # 5. MAT RENDERING & DIRECTION ARROWS
     render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_AGE)  # tracking_pipeline.render_gallery
+
+    # Cache per-frame court coords so confirmed events can later include the exact
+    # window's mat data (and the frontend can re-render it on demand).
+    try:
+        _FRAME_GALLERY_HISTORY[int(frame_idx)] = _snapshot_frame_for_mat(frame_idx, GALLERY, RAIDER_ID)
+        if len(_FRAME_GALLERY_HISTORY) > (_FRAME_HISTORY_KEEP + 50):
+            cutoff = int(frame_idx) - int(_FRAME_HISTORY_KEEP)
+            for k in list(_FRAME_GALLERY_HISTORY.keys()):
+                if int(k) < cutoff:
+                    del _FRAME_GALLERY_HISTORY[k]
+    except Exception:
+        pass
 
     if RAID_ASSIGNMENT_DONE and RAIDER_ID is not None:
         raider_track = GALLERY.get(RAIDER_ID)
@@ -592,6 +686,7 @@ while vs.running():
         scene_graph,
     )
     for confirmed_event in confirmed_events:
+        _archive_event_mat_window(confirmed_event)
         log_confirmed_event(confirmed_event)
     
     if frame_idx % 30 == 0:
@@ -737,8 +832,9 @@ while vs.running():
     )
   
     # Display current scores on mat
-    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+    score_ink = (230, 230, 230) if MAT_TRANSPARENT_BG else (0, 0, 0)
+    cv2.putText(mat, f"Total Points: {TOTAL_POINTS}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, score_ink, 2)
+    cv2.putText(mat, f"Current Raid: {CURRENT_RAID_POINTS}", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, score_ink, 2)
 
     # Add frame ID to video
     cv2.putText(vis, f"Frame: {frame_idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
@@ -956,6 +1052,17 @@ while vs.running():
     report_builder.capture_events(confirmed_events)  # report_video.ConfirmedInteractionReportBuilder.capture_events
     if report_builder.has_classifier_inputs():
         classifier_inputs = report_builder.consume_classifier_inputs()  # report_video.ConfirmedInteractionReportBuilder.consume_classifier_inputs
+        for item in classifier_inputs:
+            try:
+                event = item.get("event", {}) or {}
+                payload = item.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
+                    item["payload"] = payload
+                payload["mat_window"] = _CONFIRMED_EVENT_MAT_ARCHIVE.get(_event_key(event), [])
+                payload["court_meta"] = COURT_META
+            except Exception:
+                pass
         exported_windows = dataset_exporter.export_batch(classifier_inputs)  # dataset_exporter.ConfirmedWindowDatasetExporter.export_batch
         classifier_results = classifier_bridge.score_batch(classifier_inputs)  # classifier_bridge.ConfirmedWindowClassifierBridge.score_batch
         apply_classifier_results(CONFIRMED_EVENT_LOG, classifier_results)
@@ -1002,12 +1109,21 @@ try:
     os.makedirs(archive_dir, exist_ok=True)
     archive_path = os.path.join(archive_dir, f"confirmed_events_{path_hash}.json")
     latest_path = os.path.join(archive_dir, "confirmed_events_latest.json")
+    events_out = []
+    try:
+        for ev in CONFIRMED_EVENT_LOG:
+            row = dict(ev) if isinstance(ev, dict) else {"event": ev}
+            row["mat_window"] = _CONFIRMED_EVENT_MAT_ARCHIVE.get(_event_key(row), [])
+            events_out.append(row)
+    except Exception:
+        events_out = list(CONFIRMED_EVENT_LOG)
     payload = {
         "video_path": VIDEO_PATH,
         "path_hash": path_hash,
         "processed_video": os.path.basename(output_filename),
         "report_video": os.path.basename(report_output_filename),
-        "events": CONFIRMED_EVENT_LOG,
+        "court_meta": COURT_META,
+        "events": events_out,
     }
     with open(archive_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
@@ -1033,11 +1149,22 @@ try:
     if (not _USER_QUIT) and sys.stdin is not None and sys.stdin.isatty():
         print("\nBackend is now in ARCHIVE mode (API still running on http://localhost:8000).")
         while True:
-            cmd = input("Type q to quit: ").strip().lower()
+            cmd = input("Type q to quit, n to restart: ").strip().lower()
             if cmd in ("q", "quit", "exit"):
+                break
+            if cmd in ("n", "new", "restart", "r"):
+                _USER_RESTART = True
                 break
 except (KeyboardInterrupt, EOFError):
     pass
 
 if _USER_QUIT:
     print("[QUIT] User requested quit during processing.")
+
+if _USER_RESTART:
+    # Full process restart (useful for iterative runs without manually re-launching Python).
+    try:
+        print("[RESTART] Restarting backend...")
+    except Exception:
+        pass
+    os.execv(sys.executable, [sys.executable] + sys.argv)

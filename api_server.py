@@ -48,6 +48,16 @@ def _drain_latest(q: "queue.Queue[Any]") -> Any | None:
     return latest
 
 
+def _cors_headers(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _jpeg_bytes(bgr_frame, quality: int = 80) -> bytes:
     ok, buf = cv2.imencode(".jpg", bgr_frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
     if not ok:
@@ -137,6 +147,67 @@ def _mjpeg_from_video_file(path: Path, fps_cap: float = 30.0, loop: bool = True)
                     continue
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
+
+            now = time.time()
+            dt = now - last_emit
+            if dt < min_dt:
+                time.sleep(min_dt - dt)
+            last_emit = time.time()
+
+            try:
+                jpg = _jpeg_bytes(frame, quality=80)
+            except Exception:
+                continue
+
+            headers = (
+                b"--" + boundary + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(jpg)}\r\n\r\n".encode("ascii")
+            )
+            yield headers + jpg + b"\r\n"
+    finally:
+        cap.release()
+
+
+def _crop_combined_frame(bgr_frame, kind: str):
+    """
+    Crop `vis`/`mat`/`graph` from the combined dashboard frame produced by Court_code2.py.
+    """
+    rects = _combined_slices(int(bgr_frame.shape[1]))
+    if kind not in rects:
+        return bgr_frame
+    x0, y0, x1, y1 = rects[kind]
+    if y1 == -1:
+        return bgr_frame[:, x0:x1]
+    return bgr_frame[y0:y1, x0:x1]
+
+
+def _mjpeg_from_combined_video_file(path: Path, kind: str, fps_cap: float = 30.0, loop: bool = True):
+    """
+    MJPEG stream from a saved *combined* video file (vis|mat|graph), cropped to a single panel.
+    """
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        return
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    fps = float(src_fps) if src_fps and src_fps > 0 else float(fps_cap)
+    fps = min(float(fps_cap), fps) if fps_cap else fps
+    min_dt = 1.0 / max(1.0, fps)
+    last_emit = 0.0
+    boundary = b"frame"
+
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                if not loop:
+                    time.sleep(0.2)
+                    continue
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            frame = _crop_combined_frame(frame, kind)
 
             now = time.time()
             dt = now - last_emit
@@ -432,6 +503,7 @@ def _range_file_response(request: Request, path: Path, media_type: str):
         "Accept-Ranges": "bytes",
         "Content-Disposition": f'inline; filename="{path.name}"',
     }
+    headers.update(_cors_headers())
 
     if not range_header:
         # Let Starlette handle streaming; include Accept-Ranges regardless.
@@ -443,7 +515,7 @@ def _range_file_response(request: Request, path: Path, media_type: str):
 
     start_s, end_s = m.group(1), m.group(2)
     if start_s == "" and end_s == "":
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+        return Response(status_code=416, headers=_cors_headers({"Content-Range": f"bytes */{file_size}"}))
 
     if start_s == "":
         # Suffix bytes: "-N" => last N bytes.
@@ -455,7 +527,7 @@ def _range_file_response(request: Request, path: Path, media_type: str):
         end = int(end_s) if end_s else file_size - 1
 
     if start >= file_size:
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+        return Response(status_code=416, headers=_cors_headers({"Content-Range": f"bytes */{file_size}"}))
 
     end = min(end, file_size - 1)
     content_length = (end - start) + 1
@@ -545,7 +617,45 @@ def get_video_mjpeg(filename: str):
     return StreamingResponse(
         _mjpeg_from_video_file(path, fps_cap=30.0, loop=True),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store"},
+        headers=_cors_headers({"Cache-Control": "no-store"}),
+    )
+
+
+@app.get("/api/videos/mjpeg/vis/{filename}")
+def get_video_mjpeg_vis(filename: str):
+    videos_dir = _videos_dir()
+    videos_dir.mkdir(parents=True, exist_ok=True)
+
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    path = videos_dir / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    return StreamingResponse(
+        _mjpeg_from_combined_video_file(path, "vis", fps_cap=30.0, loop=True),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_cors_headers({"Cache-Control": "no-store"}),
+    )
+
+
+@app.get("/api/videos/mjpeg/mat/{filename}")
+def get_video_mjpeg_mat(filename: str):
+    videos_dir = _videos_dir()
+    videos_dir.mkdir(parents=True, exist_ok=True)
+
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    path = videos_dir / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    return StreamingResponse(
+        _mjpeg_from_combined_video_file(path, "mat", fps_cap=30.0, loop=True),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_cors_headers({"Cache-Control": "no-store"}),
     )
 
 
@@ -567,6 +677,33 @@ def event_details(event_id: str):
         except Exception:
             payload = None
 
+    # Best-effort: also attach archived mat/court-coordinate window data (if present).
+    archive_event = None
+    court_meta = None
+    try:
+        archive_path = _videos_dir() / "confirmed_events_latest.json"
+        if archive_path.exists():
+            archive_payload = json.loads(archive_path.read_text(encoding="utf-8"))
+            court_meta = archive_payload.get("court_meta")
+            events = archive_payload.get("events", [])
+            if isinstance(events, list):
+                for ev in events:
+                    try:
+                        if str(ev.get("type")) != str(event_type):
+                            continue
+                        if int(ev.get("frame", -1)) != int(frame):
+                            continue
+                        if str(ev.get("subject")) != str(subject):
+                            continue
+                        if str(ev.get("object")) != str(obj):
+                            continue
+                        archive_event = ev
+                        break
+                    except Exception:
+                        continue
+    except Exception:
+        archive_event = None
+
     return {
         "event_id": event_id,
         "clip_id": clip_id,
@@ -575,6 +712,8 @@ def event_details(event_id: str):
         "clip_url": f"/api/events/clip/{clip_id}" if clip_path.exists() else None,
         "payload_url": f"/api/events/payload/{clip_id}" if payload_path.exists() else None,
         "payload": payload,
+        "archive_event": archive_event,
+        "court_meta": court_meta,
     }
 
 
@@ -594,7 +733,31 @@ def get_event_clip_mjpeg(clip_id: str):
     return StreamingResponse(
         _mjpeg_from_video_file(clip_path, fps_cap=30.0, loop=True),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-store"},
+        headers=_cors_headers({"Cache-Control": "no-store"}),
+    )
+
+
+@app.get("/api/events/clip_mjpeg/vis/{clip_id}")
+def get_event_clip_mjpeg_vis(clip_id: str):
+    clip_path, _ = _paths_for_clip_id(clip_id)
+    if not clip_path.exists():
+        raise HTTPException(status_code=404, detail="Clip not found.")
+    return StreamingResponse(
+        _mjpeg_from_combined_video_file(clip_path, "vis", fps_cap=30.0, loop=True),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_cors_headers({"Cache-Control": "no-store"}),
+    )
+
+
+@app.get("/api/events/clip_mjpeg/mat/{clip_id}")
+def get_event_clip_mjpeg_mat(clip_id: str):
+    clip_path, _ = _paths_for_clip_id(clip_id)
+    if not clip_path.exists():
+        raise HTTPException(status_code=404, detail="Clip not found.")
+    return StreamingResponse(
+        _mjpeg_from_combined_video_file(clip_path, "mat", fps_cap=30.0, loop=True),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_cors_headers({"Cache-Control": "no-store"}),
     )
 
 

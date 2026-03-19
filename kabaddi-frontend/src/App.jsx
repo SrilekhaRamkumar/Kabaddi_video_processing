@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import Graph2D from './Graph2D.jsx'
+import CourtMat2D from './CourtMat2D.jsx'
+import RaidReplay3D from './RaidReplay3D.jsx'
 
 const LS_BACKEND_HTTP = 'kabaddi.backendHttp'
 const LS_THEME = 'kabaddi.theme'
@@ -85,8 +87,9 @@ function StreamView({ src, alt, height = 360 }) {
   )
 }
 
-function VideoPreview({ mp4Src, mjpegSrc, title = 'Video' }) {
+function VideoPreview({ mp4Src, mjpegSrc, title = 'Video', allowFullscreen = false }) {
   const [fallback, setFallback] = useState(false)
+  const mjpegRef = useRef(null)
 
   useEffect(() => {
     // If the source changes, retry MP4 first.
@@ -102,12 +105,40 @@ function VideoPreview({ mp4Src, mjpegSrc, title = 'Video' }) {
   }
 
   if (fallback) {
+    const onFullscreen = async () => {
+      const el = mjpegRef.current
+      if (!allowFullscreen) return
+      try {
+        if (el && el.requestFullscreen) {
+          await el.requestFullscreen()
+          return
+        }
+      } catch {
+        // ignore
+      }
+      // Fallback: open the MJPEG stream in a new tab/window.
+      if (mjpegSrc) window.open(mjpegSrc, '_blank', 'noopener,noreferrer')
+    }
+
     return (
       <div className="space-y-2">
-        <div className="text-[11px] text-stone-600 dark:text-stone-400">
-          MP4 playback failed in this browser. Showing MJPEG fallback.
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-[11px] text-stone-600 dark:text-stone-400">
+            MP4 playback failed in this browser. Showing MJPEG fallback.
+          </div>
+          {allowFullscreen ? (
+            <button
+              className="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[11px] font-medium shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
+              onClick={onFullscreen}
+              type="button"
+            >
+              Fullscreen
+            </button>
+          ) : null}
         </div>
-        <StreamView src={mjpegSrc} alt={`${title} MJPEG`} />
+        <div ref={mjpegRef}>
+          <StreamView src={mjpegSrc} alt={`${title} MJPEG`} />
+        </div>
       </div>
     )
   }
@@ -120,6 +151,367 @@ function VideoPreview({ mp4Src, mjpegSrc, title = 'Video' }) {
       onError={() => setFallback(true)}
     />
   )
+}
+
+function OverlayMjpegPlayer({
+  baseSrc,
+  overlaySrc,
+  overlayContent,
+  height = 260,
+  overlayOpacity = 1,
+  title = 'Overlay',
+  allowFullscreen = false,
+  replay3d = null,
+  theme = 'dark',
+}) {
+  const wrapRef = useRef(null)
+  const baseImgRef = useRef(null)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [show3D, setShow3D] = useState(false)
+
+  useEffect(() => {
+    const onChange = () => {
+      try {
+        setIsFullscreen(document.fullscreenElement === wrapRef.current)
+      } catch {
+        setIsFullscreen(false)
+      }
+    }
+    try {
+      document.addEventListener('fullscreenchange', onChange)
+    } catch {
+      // ignore
+    }
+    onChange()
+    return () => {
+      try {
+        document.removeEventListener('fullscreenchange', onChange)
+      } catch {
+        // ignore
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    // 3D view is fullscreen-only.
+    if (!isFullscreen) setShow3D(false)
+  }, [isFullscreen])
+
+  const onFullscreen = async () => {
+    if (!allowFullscreen) return
+    const el = wrapRef.current
+    try {
+      if (el?.requestFullscreen) {
+        await el.requestFullscreen()
+        return
+      }
+      if (el?.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen()
+        return
+      }
+    } catch {
+      // ignore
+    }
+    if (baseSrc) window.open(baseSrc, '_blank', 'noopener,noreferrer')
+  }
+
+  const onCloseFullscreen = async () => {
+    const doc = wrapRef.current?.ownerDocument || document
+    try {
+      if (doc.fullscreenElement && doc.exitFullscreen) {
+        await doc.exitFullscreen()
+        return
+      }
+      if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen()
+        return
+      }
+      if (wrapRef.current?.classList?.contains('fallback-fullscreen')) {
+        wrapRef.current.classList.remove('fallback-fullscreen')
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const can3D =
+    !!replay3d &&
+    Array.isArray(replay3d.matWindow) &&
+    replay3d.matWindow.length > 0
+
+  const canPoseOverlay =
+    !!replay3d &&
+    Array.isArray(replay3d.poseWindow) &&
+    replay3d.poseWindow.length > 0
+
+  if (!baseSrc) {
+    return (
+      <div className="grid place-items-center rounded-xl border border-dashed border-stone-200 bg-stone-50 text-xs text-stone-500 dark:border-stone-800 dark:bg-stone-950/30 dark:text-stone-400" style={{ height }}>
+        No {title.toLowerCase()}.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] text-stone-600 dark:text-stone-400">
+          Video with mat overlay.
+        </div>
+        {allowFullscreen ? (
+          <button
+            className="rounded-full border border-stone-200 bg-white px-2.5 py-1 text-[11px] font-medium shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
+            onClick={onFullscreen}
+            type="button"
+          >
+            Fullscreen
+          </button>
+        ) : null}
+      </div>
+
+      <div
+        ref={wrapRef}
+        className="relative overflow-hidden rounded-xl border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950/40"
+        style={{ height }}
+      >
+        {allowFullscreen && isFullscreen ? (
+          <div className="absolute right-2 top-2 z-[120] flex items-center gap-2">
+            {can3D ? (
+              <button
+                type="button"
+                onClick={() => setShow3D((v) => !v)}
+                className={`grid h-9 place-items-center rounded-full border px-3 text-[12px] font-semibold shadow-sm backdrop-blur ${
+                  show3D
+                    ? 'border-white/20 bg-white/20 text-white hover:bg-white/24'
+                    : 'border-white/15 bg-black/45 text-white hover:bg-black/60'
+                }`}
+                aria-pressed={show3D}
+                title="Toggle 3D replay"
+              >
+                3D
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={onCloseFullscreen}
+              className="grid h-9 w-9 place-items-center rounded-full border border-white/15 bg-black/65 text-sm font-semibold text-white shadow-lg backdrop-blur hover:bg-black/80"
+              aria-label="Close fullscreen"
+              title="Close"
+            >
+              X
+            </button>
+          </div>
+        ) : null}
+        <div
+          className={`absolute inset-0 transition-opacity duration-300 ${
+            show3D ? 'opacity-0' : 'opacity-100'
+          }`}
+          style={{ pointerEvents: show3D ? 'none' : 'auto' }}
+        >
+          <img
+            ref={baseImgRef}
+            src={baseSrc}
+            alt="Video stream"
+            className="absolute inset-0 h-full w-full object-contain"
+            loading="eager"
+            decoding="async"
+            referrerPolicy="no-referrer"
+          />
+          {isFullscreen && canPoseOverlay && !show3D ? (
+            <PoseOverlayCanvas
+              mediaRef={baseImgRef}
+              poseWindow={replay3d.poseWindow}
+              poseMeta={replay3d.poseMeta}
+              theme={theme}
+            />
+          ) : null}
+          {!show3D && (overlaySrc || overlayContent) ? (
+            <div
+              className="pointer-events-none absolute bottom-2 left-2 overflow-hidden rounded-lg border border-stone-200/60 bg-transparent dark:border-stone-800/70"
+              style={{
+                width: '26%',
+                maxWidth: 200,
+                minWidth: 130,
+              }}
+            >
+              <div className="relative">
+                {overlayContent ? (
+                  <div className="w-full">{overlayContent}</div>
+                ) : overlaySrc ? (
+                  <img
+                    src={overlaySrc}
+                    alt="Mat overlay"
+                    className="h-auto w-full object-contain"
+                    style={{
+                      opacity: overlayOpacity,
+                    }}
+                    loading="eager"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        {can3D ? (
+          <div
+            className={`absolute inset-0 transition-opacity duration-300 ${
+              show3D ? 'opacity-100' : 'opacity-0'
+            }`}
+            style={{ pointerEvents: show3D ? 'auto' : 'none' }}
+          >
+            {show3D ? (
+              <RaidReplay3D
+                matWindow={replay3d.matWindow}
+                poseWindow={replay3d.poseWindow}
+                poseMeta={replay3d.poseMeta}
+                event={replay3d.event}
+                courtMeta={replay3d.courtMeta}
+                videoSrc={baseSrc}
+                videoFileSrc={replay3d.videoFileSrc}
+                theme={theme}
+              />
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function PoseOverlayCanvas({ mediaRef, poseWindow, poseMeta, theme = 'dark' }) {
+  const canvasRef = useRef(null)
+  const isDark = theme === 'dark'
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const media = mediaRef.current
+    if (!canvas || !media || !Array.isArray(poseWindow) || poseWindow.length === 0) return
+
+    const keypointNames =
+      Array.isArray(poseMeta?.keypoint_names) && poseMeta.keypoint_names.length
+        ? poseMeta.keypoint_names
+        : [
+            'nose',
+            'left_eye',
+            'right_eye',
+            'left_ear',
+            'right_ear',
+            'left_shoulder',
+            'right_shoulder',
+            'left_elbow',
+            'right_elbow',
+            'left_wrist',
+            'right_wrist',
+            'left_hip',
+            'right_hip',
+            'left_knee',
+            'right_knee',
+            'left_ankle',
+            'right_ankle',
+          ]
+    const edges =
+      Array.isArray(poseMeta?.skeleton_edges) && poseMeta.skeleton_edges.length
+        ? poseMeta.skeleton_edges
+        : [
+            [5, 7],
+            [7, 9],
+            [6, 8],
+            [8, 10],
+            [5, 6],
+            [5, 11],
+            [6, 12],
+            [11, 13],
+            [13, 15],
+            [12, 14],
+            [14, 16],
+            [11, 12],
+          ]
+
+    let raf = 0
+    let startedAt = performance.now()
+
+    const draw = () => {
+      const ctx = canvas.getContext('2d')
+      const hostW = canvas.clientWidth || 1
+      const hostH = canvas.clientHeight || 1
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1))
+      if (canvas.width !== Math.floor(hostW * dpr) || canvas.height !== Math.floor(hostH * dpr)) {
+        canvas.width = Math.floor(hostW * dpr)
+        canvas.height = Math.floor(hostH * dpr)
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height)
+      ctx.save()
+      ctx.scale(dpr, dpr)
+
+      const mediaW = media.naturalWidth || media.videoWidth || 0
+      const mediaH = media.naturalHeight || media.videoHeight || 0
+      if (mediaW > 0 && mediaH > 0) {
+        const s = Math.min(hostW / mediaW, hostH / mediaH)
+        const drawW = mediaW * s
+        const drawH = mediaH * s
+        const ox = (hostW - drawW) / 2
+        const oy = (hostH - drawH) / 2
+        const idx = Math.floor(((performance.now() - startedAt) / 1000) * 30) % poseWindow.length
+        const frame = poseWindow[idx] || {}
+        const players = Array.isArray(frame.players) ? frame.players : []
+
+        players.slice(0, 3).forEach((player, playerIdx) => {
+          const color =
+            playerIdx === 0
+              ? isDark
+                ? 'rgba(245,222,179,0.96)'
+                : 'rgba(120,92,40,0.96)'
+              : playerIdx === 1
+                ? isDark
+                  ? 'rgba(226,232,240,0.96)'
+                  : 'rgba(31,41,55,0.96)'
+                : isDark
+                  ? 'rgba(148,163,184,0.94)'
+                  : 'rgba(71,85,105,0.94)'
+          const points = Array.isArray(player?.keypoints) ? player.keypoints : []
+          const byName = new Map()
+          for (let i = 0; i < points.length; i++) {
+            const kp = points[i]
+            const x = Number(kp?.x)
+            const y = Number(kp?.y)
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+            byName.set(kp?.name || keypointNames[i] || `kp_${i}`, { x, y })
+          }
+
+          ctx.strokeStyle = color
+          ctx.fillStyle = color
+          ctx.lineWidth = 3
+          for (const [aIdx, bIdx] of edges) {
+            const a = byName.get(keypointNames[aIdx])
+            const b = byName.get(keypointNames[bIdx])
+            if (!a || !b) continue
+            ctx.beginPath()
+            ctx.moveTo(ox + a.x * s, oy + a.y * s)
+            ctx.lineTo(ox + b.x * s, oy + b.y * s)
+            ctx.stroke()
+          }
+          for (const kp of byName.values()) {
+            ctx.beginPath()
+            ctx.arc(ox + kp.x * s, oy + kp.y * s, 3.3, 0, Math.PI * 2)
+            ctx.fill()
+          }
+        })
+      }
+
+      ctx.restore()
+      raf = requestAnimationFrame(draw)
+    }
+
+    raf = requestAnimationFrame(draw)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [mediaRef, poseWindow, poseMeta, isDark])
+
+  return <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 z-[2] h-full w-full" />
 }
 
 function _fmtPid(pid) {
@@ -383,6 +775,15 @@ function App() {
     error: null,
     data: null,
   })
+  const selectedMatSnapshot = useMemo(() => {
+    const ev = selectedDetails?.data?.archive_event
+    const window = ev?.mat_window
+    if (!Array.isArray(window) || window.length === 0) return null
+
+    const targetFrame = selectedEvent?.frame ?? ev?.frame
+    const exact = window.find((s) => Number(s?.frame) === Number(targetFrame))
+    return exact || window[Math.floor(window.length / 2)] || null
+  }, [selectedDetails, selectedEvent])
 
   useEffect(() => {
     if (!showLive) return
@@ -412,10 +813,18 @@ function App() {
       videoFile: (name) => `${baseUrl}/api/videos/file/${encodeURIComponent(name)}`,
       videoMjpeg: (name) =>
         `${baseUrl}/api/videos/mjpeg/${encodeURIComponent(name)}`,
+      videoMjpegVis: (name) =>
+        `${baseUrl}/api/videos/mjpeg/vis/${encodeURIComponent(name)}`,
+      videoMjpegMat: (name) =>
+        `${baseUrl}/api/videos/mjpeg/mat/${encodeURIComponent(name)}`,
       eventDetails: (eventId) =>
         `${baseUrl}/api/events/details/${encodeURIComponent(eventId)}`,
       eventClipMjpeg: (clipId) =>
         `${baseUrl}/api/events/clip_mjpeg/${encodeURIComponent(clipId)}`,
+      eventClipMjpegVis: (clipId) =>
+        `${baseUrl}/api/events/clip_mjpeg/vis/${encodeURIComponent(clipId)}`,
+      eventClipMjpegMat: (clipId) =>
+        `${baseUrl}/api/events/clip_mjpeg/mat/${encodeURIComponent(clipId)}`,
       archiveEvents: `${baseUrl}/api/archive/events`,
     }
   }, [baseUrl])
@@ -773,10 +1182,7 @@ function App() {
                     Validated touches:
                   </span>{' '}
                   <span className="font-semibold tabular-nums">{validatedTouchScore}</span>
-                  <span className="text-stone-500 dark:text-stone-400">
-                    {' '}
-                    (+1 each)
-                  </span>
+                  
                 </div>
                 <div className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs dark:border-stone-800 dark:bg-stone-900/60">
                   <span className="text-stone-500 dark:text-stone-400">
@@ -893,11 +1299,14 @@ function App() {
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-1">
                 <Panel title="2D Mat" density="compact">
-                  <StreamView
-                    src={endpoints?.matStream}
-                    alt="2D mat stream"
-                    height={200}
-                  />
+                  <div className="grid w-full place-items-center overflow-hidden rounded-xl border border-stone-200 bg-stone-950/10 dark:border-stone-800 dark:bg-stone-950/40">
+                    <CourtMat2D
+                      players={live?.gallery}
+                      raiderId={live?.raider_id}
+                      height={200}
+                      theme={theme}
+                    />
+                  </div>
                 </Panel>
               </div>
 
@@ -1187,15 +1596,57 @@ function App() {
                   <div className="mt-2">
                     {selectedDetails.status === 'ready' &&
                     selectedDetails.data?.clip_url ? (
-                      <VideoPreview
-                        title="Event clip"
-                        mp4Src={`${baseUrl}${selectedDetails.data.clip_url}`}
-                        mjpegSrc={
-                          endpoints && selectedDetails.data?.clip_id
-                            ? endpoints.eventClipMjpeg(selectedDetails.data.clip_id)
-                            : ''
-                        }
-                      />
+                      endpoints && selectedDetails.data?.clip_id ? (
+                        <OverlayMjpegPlayer
+                          title="Event clip"
+                          baseSrc={endpoints.eventClipMjpegVis(selectedDetails.data.clip_id)}
+                          replay3d={{
+                            matWindow:
+                              selectedDetails.data?.archive_event?.mat_window ||
+                              selectedDetails.data?.payload?.payload?.mat_window ||
+                              [],
+                            poseWindow:
+                              selectedDetails.data?.payload?.payload?.pose_window || [],
+                            poseMeta:
+                              selectedDetails.data?.payload?.payload?.pose_meta || null,
+                            videoFileSrc: `${baseUrl}${selectedDetails.data.clip_url}`,
+                            event:
+                              selectedDetails.data?.payload?.event ||
+                              selectedDetails.data?.archive_event ||
+                              selectedEvent ||
+                              null,
+                            courtMeta:
+                              selectedDetails.data?.court_meta ||
+                              selectedDetails.data?.payload?.payload?.court_meta ||
+                              null,
+                          }}
+                          overlayContent={
+                            <div className="rounded-md bg-black/20 p-1">
+                              <CourtMat2D
+                                players={selectedMatSnapshot?.players ?? live?.gallery}
+                                raiderId={selectedMatSnapshot?.raider_id ?? live?.raider_id}
+                                height={110}
+                                theme={theme}
+                              />
+                            </div>
+                          }
+                          height={260}
+                          overlayOpacity={1}
+                          allowFullscreen
+                          theme={theme}
+                        />
+                      ) : (
+                        <VideoPreview
+                          title="Event clip"
+                          mp4Src={`${baseUrl}${selectedDetails.data.clip_url}`}
+                          mjpegSrc={
+                            endpoints && selectedDetails.data?.clip_id
+                              ? endpoints.eventClipMjpeg(selectedDetails.data.clip_id)
+                              : ''
+                          }
+                          allowFullscreen
+                        />
+                      )
                     ) : selectedDetails.status === 'loading' ? (
                       <div className="grid h-[220px] place-items-center rounded-xl border border-dashed border-stone-200 bg-white text-xs text-stone-500 dark:border-stone-800 dark:bg-stone-950/30 dark:text-stone-400">
                         Loading clip...

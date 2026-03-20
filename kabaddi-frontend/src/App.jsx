@@ -168,70 +168,42 @@ function OverlayMjpegPlayer({
   const baseImgRef = useRef(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [show3D, setShow3D] = useState(false)
+  const [overlayFrameIndex, setOverlayFrameIndex] = useState(0)
+
+  const archiveMatWindow =
+    Array.isArray(replay3d?.matWindow) && replay3d.matWindow.length > 0
+      ? replay3d.matWindow
+      : null
 
   useEffect(() => {
-    const onChange = () => {
-      try {
-        setIsFullscreen(document.fullscreenElement === wrapRef.current)
-      } catch {
-        setIsFullscreen(false)
-      }
-    }
-    try {
-      document.addEventListener('fullscreenchange', onChange)
-    } catch {
-      // ignore
-    }
-    onChange()
-    return () => {
-      try {
-        document.removeEventListener('fullscreenchange', onChange)
-      } catch {
-        // ignore
-      }
-    }
-  }, [])
+    setOverlayFrameIndex(0)
+  }, [archiveMatWindow, baseSrc])
 
   useEffect(() => {
-    // 3D view is fullscreen-only.
+    if (!archiveMatWindow || archiveMatWindow.length <= 1) return
+    const timer = window.setInterval(() => {
+      setOverlayFrameIndex((prev) => (prev + 1) % archiveMatWindow.length)
+    }, 1000 / 12)
+    return () => window.clearInterval(timer)
+  }, [archiveMatWindow])
+
+  const animatedOverlaySnapshot = archiveMatWindow
+    ? archiveMatWindow[Math.max(0, Math.min(archiveMatWindow.length - 1, overlayFrameIndex))]
+    : null
+
+  useEffect(() => {
+    // 3D view is expanded-view only.
     if (!isFullscreen) setShow3D(false)
   }, [isFullscreen])
 
   const onFullscreen = async () => {
     if (!allowFullscreen) return
-    const el = wrapRef.current
-    try {
-      if (el?.requestFullscreen) {
-        await el.requestFullscreen()
-        return
-      }
-      if (el?.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen()
-        return
-      }
-    } catch {
-      // ignore
-    }
-    if (baseSrc) window.open(baseSrc, '_blank', 'noopener,noreferrer')
+    setIsFullscreen(true)
   }
 
   const onCloseFullscreen = async () => {
-    const doc = wrapRef.current?.ownerDocument || document
-    try {
-      if (doc.fullscreenElement && doc.exitFullscreen) {
-        await doc.exitFullscreen()
-        return
-      }
-      if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
-        doc.webkitExitFullscreen()
-        return
-      }
-      if (wrapRef.current?.classList?.contains('fallback-fullscreen')) {
-        wrapRef.current.classList.remove('fallback-fullscreen')
-      }
-    } catch {
-      // ignore
-    }
+    setIsFullscreen(false)
+    setShow3D(false)
   }
 
   const can3D =
@@ -269,10 +241,23 @@ function OverlayMjpegPlayer({
         ) : null}
       </div>
 
+      {isFullscreen ? (
+        <div
+          className="fixed inset-0 z-[120] bg-black/55 backdrop-blur-sm"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) onCloseFullscreen()
+          }}
+        />
+      ) : null}
+
       <div
         ref={wrapRef}
-        className="relative overflow-hidden rounded-xl border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950/40"
-        style={{ height }}
+        className={`overflow-hidden border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950/40 ${
+          isFullscreen
+            ? 'fixed inset-4 z-[130] rounded-2xl shadow-2xl'
+            : 'relative rounded-xl'
+        }`}
+        style={isFullscreen ? undefined : { height }}
       >
         {allowFullscreen && isFullscreen ? (
           <div className="absolute right-2 top-2 z-[120] flex items-center gap-2">
@@ -336,7 +321,11 @@ function OverlayMjpegPlayer({
             >
               <div className="relative">
                 {overlayContent ? (
-                  <div className="w-full">{overlayContent}</div>
+                  <div className="w-full">
+                    {typeof overlayContent === 'function'
+                      ? overlayContent(animatedOverlaySnapshot)
+                      : overlayContent}
+                  </div>
                 ) : overlaySrc ? (
                   <img
                     src={overlaySrc}
@@ -685,6 +674,103 @@ function TripletList({ title, items, raiderId, kind }) {
           No {kind} triplets yet.
         </div>
       )}
+    </div>
+  )
+}
+
+function FrameEventsList({ frameIdx, hhi, hli, events }) {
+  const currentFrame = Number(frameIdx)
+  const hhiItems = []
+  const hliItems = []
+
+  if (Number.isFinite(currentFrame)) {
+    for (const item of Array.isArray(hhi) ? hhi : []) {
+      if (Number(item?.frame) !== currentFrame) continue
+      hhiItems.push({
+        key: `hhi-${item?.S}-${item?.O}-${item?.I}`,
+        tone: 'slate',
+        title: 'HHI contact',
+        detail: `${_fmtPid(item?.S)} -> ${_fmtPid(item?.O)} | ${item?.I ?? '-'} | d ${Number(item?.dist ?? 0).toFixed(2)} | rv ${Number(item?.rel_vel ?? 0).toFixed(2)}`,
+      })
+    }
+    for (const item of Array.isArray(events) ? events : []) {
+      if (Number(item?.frame) !== currentFrame) continue
+      const detail = `${item?.subject ?? '-'} / ${item?.object ?? '-'} | conf ${item?.conf ?? '-'} | factor ${item?.factor_conf ?? '-'}`
+      if (String(item?.type || '').includes('CONTACT')) {
+        hhiItems.push({
+          key: item?.id ?? `ev-hhi-${item?.type}-${item?.frame}`,
+          tone: item?.classifier_label === 'valid' ? 'emerald' : 'rose',
+          title: formatEventType(item?.type),
+          detail,
+        })
+      } else {
+        hliItems.push({
+          key: item?.id ?? `ev-hli-${item?.type}-${item?.frame}`,
+          tone: item?.classifier_label === 'valid' ? 'emerald' : 'amber',
+          title: formatEventType(item?.type),
+          detail,
+        })
+      }
+    }
+    for (const item of Array.isArray(hli) ? hli : []) {
+      if (Number(item?.frame) !== currentFrame) continue
+      hliItems.push({
+        key: `hli-${item?.S}-${item?.O}-${item?.I}`,
+        tone: item?.active ? 'amber' : 'slate',
+        title: item?.active ? 'Line touch' : 'Line near',
+        detail: `${_fmtPid(item?.S)} -> ${String(item?.O ?? '-')} | ${item?.I ?? '-'} | d ${Number(item?.dist ?? 0).toFixed(2)}`,
+      })
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {[
+        { title: 'HHI events', items: hhiItems },
+        { title: 'HLI events', items: hliItems },
+      ].map((section) => (
+        <div
+          key={section.title}
+          className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-950/20"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold text-stone-700 dark:text-stone-200">
+              {section.title}
+            </div>
+            <Badge tone="slate">{section.items.length}</Badge>
+          </div>
+          {section.items.length ? (
+            <div className="mt-2 space-y-1.5">
+              {section.items.map((item) => (
+                <div
+                  key={item.key}
+                  className="rounded-lg bg-stone-50 px-2 py-2 text-[11px] text-stone-700 dark:bg-stone-900/40 dark:text-stone-200"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-semibold">{item.title}</div>
+                    <Badge tone={item.tone}>
+                      {item.tone === 'emerald'
+                        ? 'confirmed'
+                        : item.tone === 'amber'
+                          ? 'active'
+                          : item.tone === 'rose'
+                            ? 'rejected'
+                            : 'live'}
+                    </Badge>
+                  </div>
+                  <div className="mt-1 text-stone-500 dark:text-stone-400">
+                    {item.detail}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-2 text-xs text-stone-600 dark:text-stone-400">
+              No {section.title.toLowerCase()} at this frame.
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -1359,20 +1445,12 @@ function App() {
                       )}
                     </div>
 
-                    <div className="space-y-3">
-                      <TripletList
-                        title="HHI: player-to-player"
-                        items={live?.hhi}
-                        raiderId={live?.raider_id}
-                        kind="HHI"
-                      />
-                      <TripletList
-                        title="HLI: player-to-line"
-                        items={live?.hli}
-                        raiderId={live?.raider_id}
-                        kind="HLI"
-                      />
-                    </div>
+                    <FrameEventsList
+                      frameIdx={live?.frame_idx}
+                      hhi={live?.hhi}
+                      hli={live?.hli}
+                      events={live?.events}
+                    />
                   </div>
                 </Panel>
               </div>
@@ -1620,16 +1698,24 @@ function App() {
                               selectedDetails.data?.payload?.payload?.court_meta ||
                               null,
                           }}
-                          overlayContent={
+                          overlayContent={(overlaySnapshot) => (
                             <div className="rounded-md bg-black/20 p-1">
                               <CourtMat2D
-                                players={selectedMatSnapshot?.players ?? live?.gallery}
-                                raiderId={selectedMatSnapshot?.raider_id ?? live?.raider_id}
+                                players={
+                                  overlaySnapshot?.players ??
+                                  selectedMatSnapshot?.players ??
+                                  live?.gallery
+                                }
+                                raiderId={
+                                  overlaySnapshot?.raider_id ??
+                                  selectedMatSnapshot?.raider_id ??
+                                  live?.raider_id
+                                }
                                 height={110}
                                 theme={theme}
                               />
                             </div>
-                          }
+                          )}
                           height={260}
                           overlayOpacity={1}
                           allowFullscreen

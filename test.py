@@ -1,64 +1,81 @@
-import cv2
-from ultralytics import YOLO
+import numpy as np
+from direct.showbase.ShowBase import ShowBase
 
-# Load YOLOv8 pose model
-model = YOLO("yolov8n-pose.pt")
+class DanceApp(ShowBase):
+    def __init__(self):
+        super().__init__()
 
-# Open video (0 for webcam or give file path)
-cap = cv2.VideoCapture("Videos/Cam1/raid1.mp4")
+        self.disableMouse()
+        self.camera.setPos(0, -25, 6)
 
-frame_count = 0
-max_frames = 200  # process first few frames (change/remove if needed)
+        # Load model
+        self.actor = self.loader.loadModel("models/man.glb")
+        self.actor.reparentTo(self.render)
+        self.actor.setScale(1, 1, 1)
+        self.actor.setPos(0, 0, 0)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret or frame_count >= max_frames:
-        break
+        self.time = 0
+        self.taskMgr.add(self.update, "update")
 
-    results = model(frame)
+    def set_bone(self, name, h=0, p=0, r=0):
+        bone = self.actor.find("**/" + name)
+        if not bone.isEmpty():
+            bone.setHpr(h, p, r)
 
-    for r in results:
-        if r.boxes is None or r.keypoints is None:
-            continue
+    def update(self, task):
+        dt = globalClock.getDt()
+        self.time += dt
+        t = self.time
 
-        boxes = r.boxes.xyxy.cpu().numpy()
-        keypoints = r.keypoints.xy.cpu().numpy()
+        # -----------------------------
+        # 🔥 DANCE LOGIC
+        # -----------------------------
 
-        for box, kpts in zip(boxes, keypoints):
-            x1, y1, x2, y2 = map(int, box)
+        # Hip sway (core movement)
+        self.set_bone("hip", 0, 0, 15 * np.sin(t * 2))
 
-            # Bounding box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        # Chest twist
+        self.set_bone("chest", 0, 10 * np.sin(t * 2), 0)
 
-            # Keypoints
-            for (x, y) in kpts:
-                cv2.circle(frame, (int(x), int(y)), 4, (0, 0, 255), -1)
+        # Head bounce
+        self.set_bone("head", 0, 0, 10 * np.sin(t * 3))
 
-            # Skeleton (bones)
-            skeleton = [
-                (5, 7), (7, 9),
-                (6, 8), (8, 10),
-                (5, 6),
-                (5, 11), (6, 12),
-                (11, 13), (13, 15),
-                (12, 14), (14, 16),
-                (11, 12)
-            ]
+        # -----------------------------
+        # Arms swing
+        # -----------------------------
+        left_arm = 50 * np.sin(2 * t)
+        right_arm = -50 * np.sin(2 * t)
 
-            for i, j in skeleton:
-                if i < len(kpts) and j < len(kpts):
-                    xi, yi = kpts[i]
-                    xj, yj = kpts[j]
-                    cv2.line(frame, (int(xi), int(yi)), (int(xj), int(yj)), (255, 0, 0), 2)
+        self.set_bone("upperarmL", 0, left_arm, 0)
+        self.set_bone("upperarmR", 0, right_arm, 0)
 
-    # Display frame
-    cv2.imshow("Pose Detection", frame)
+        # Elbows
+        self.set_bone("lowerarmL", 0, 30 * np.sin(2 * t + 1), 0)
+        self.set_bone("lowerarmR", 0, -30 * np.sin(2 * t + 1), 0)
 
-    # Press 'q' to exit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        # Hands (small motion)
+        self.set_bone("handL", 0, 0, 15 * np.sin(3 * t))
+        self.set_bone("handR", 0, 0, -15 * np.sin(3 * t))
 
-    frame_count += 1
+        # -----------------------------
+        # Legs stepping
+        # -----------------------------
+        left_leg = 40 * np.sin(2 * t)
+        right_leg = -40 * np.sin(2 * t)
 
-cap.release()
-cv2.destroyAllWindows()
+        self.set_bone("upperlegL", 0, left_leg, 0)
+        self.set_bone("upperlegR", 0, right_leg, 0)
+
+        # Knees bending
+        self.set_bone("lowerlegL", 0, abs(30 * np.sin(2 * t)), 0)
+        self.set_bone("lowerlegR", 0, abs(30 * np.sin(2 * t)), 0)
+
+        # Feet tap
+        self.set_bone("footL", 0, 0, 20 * np.sin(2 * t))
+        self.set_bone("footR", 0, 0, -20 * np.sin(2 * t))
+
+        return task.cont
+
+
+app = DanceApp()
+app.run()

@@ -43,14 +43,22 @@ const DEFAULT_SKELETON_EDGES = [
   [14, 16],
 ]
 
+const MANNEQUIN_TARGET_HEIGHT = 1.42
+const MANNEQUIN_Z_OFFSET = 0
+const MANNEQUIN_Y_OFFSET = 0.04
+const MANNEQUIN_ASSET_PATH = '/man2.glb'
+const MANNEQUIN_ASSET_LABEL = 'man2.glb'
+const RAID_REPLAY_CAMERA_LOCK_KEY = 'kabaddi-raid-replay-camera-lock-v1'
+
 let mannequinAssetPromise = null
+let mannequinBoneDebugPrinted = false
 
 function loadMannequinAsset() {
   if (!mannequinAssetPromise) {
     mannequinAssetPromise = new Promise((resolve, reject) => {
       const loader = new GLTFLoader()
       loader.load(
-        '/man.glb',
+        MANNEQUIN_ASSET_PATH,
         (gltf) => resolve(gltf),
         undefined,
         (err) => reject(err),
@@ -58,6 +66,14 @@ function loadMannequinAsset() {
     })
   }
   return mannequinAssetPromise
+}
+
+function listBoneNames(root) {
+  const names = []
+  root.traverse((obj) => {
+    if (obj?.isBone) names.push(String(obj.name || ''))
+  })
+  return names
 }
 
 function _asNum(v, fb = null) {
@@ -202,23 +218,60 @@ function findBoneByPattern(root, patterns) {
 
 function buildBoneMap(root) {
   return {
-    hips: findBoneByPattern(root, [/hips?/i, /pelvis/i, /root/i]),
-    spine: findBoneByPattern(root, [/spine/i, /spine1/i, /spine_01/i]),
-    chest: findBoneByPattern(root, [/chest/i, /spine2/i, /spine_02/i, /upperchest/i]),
+    root: findBoneByPattern(root, [/^_rootjoint$/i, /^wiest$/i, /^root$/i]),
+    hips: findBoneByPattern(root, [/^hips?_/i, /^hips?$/i, /^hip$/i, /pelvis/i, /^wiest$/i, /root/i]),
+    spine: findBoneByPattern(root, [/^spine_?\d*/i, /^spine$/i, /^chest$/i, /spine1/i, /spine_01/i]),
+    chest: findBoneByPattern(root, [/^spine2_?\d*/i, /^spine1_?\d*/i, /^chest$/i, /spine2/i, /spine_02/i, /upperchest/i]),
     neck: findBoneByPattern(root, [/neck/i]),
     head: findBoneByPattern(root, [/head/i]),
-    leftUpperArm: findBoneByPattern(root, [/leftarm/i, /left_upperarm/i, /mixamorigleftarm/i, /l.*upper.*arm/i]),
-    leftLowerArm: findBoneByPattern(root, [/leftforearm/i, /left_lowerarm/i, /mixamorigleftforearm/i, /l.*lower.*arm/i]),
-    leftHand: findBoneByPattern(root, [/lefthand/i, /mixamoriglefthand/i, /l.*hand/i]),
-    rightUpperArm: findBoneByPattern(root, [/rightarm/i, /right_upperarm/i, /mixamorigrightarm/i, /r.*upper.*arm/i]),
-    rightLowerArm: findBoneByPattern(root, [/rightforearm/i, /right_lowerarm/i, /mixamorigrightforearm/i, /r.*lower.*arm/i]),
-    rightHand: findBoneByPattern(root, [/righthand/i, /mixamorigrighthand/i, /r.*hand/i]),
-    leftUpperLeg: findBoneByPattern(root, [/leftupleg/i, /leftthigh/i, /mixamorigleftupleg/i, /l.*upper.*leg/i, /l.*thigh/i]),
-    leftLowerLeg: findBoneByPattern(root, [/leftleg/i, /leftcalf/i, /mixamorigleftleg/i, /l.*lower.*leg/i, /l.*calf/i]),
-    leftFoot: findBoneByPattern(root, [/leftfoot/i, /mixamorigleftfoot/i, /l.*foot/i]),
-    rightUpperLeg: findBoneByPattern(root, [/rightupleg/i, /rightthigh/i, /mixamorigrightupleg/i, /r.*upper.*leg/i, /r.*thigh/i]),
-    rightLowerLeg: findBoneByPattern(root, [/rightleg/i, /rightcalf/i, /mixamorigrightleg/i, /r.*lower.*leg/i, /r.*calf/i]),
-    rightFoot: findBoneByPattern(root, [/rightfoot/i, /mixamorigrightfoot/i, /r.*foot/i]),
+    leftShoulder: findBoneByPattern(root, [/^leftshoulder_/i, /^KTFL$/i, /leftshoulder/i, /leftclavicle/i, /l.*shoulder/i, /l.*clav/i]),
+    leftUpperArm: findBoneByPattern(root, [/^leftarm_/i, /^upperarmL$/i, /leftarm/i, /left_upperarm/i, /mixamorigleftarm/i, /upper.*arm.*l/i]),
+    leftLowerArm: findBoneByPattern(root, [/^leftforearm_/i, /^lowerarmL$/i, /leftforearm/i, /left_lowerarm/i, /mixamorigleftforearm/i, /lower.*arm.*l/i]),
+    leftHand: findBoneByPattern(root, [/^lefthand_/i, /^handL$/i, /lefthand/i, /mixamoriglefthand/i, /hand.*l/i]),
+    rightShoulder: findBoneByPattern(root, [/^rightshoulder_/i, /^KTFR$/i, /rightshoulder/i, /rightclavicle/i, /r.*shoulder/i, /r.*clav/i]),
+    rightUpperArm: findBoneByPattern(root, [/^rightarm_/i, /^upperarmR$/i, /rightarm/i, /right_upperarm/i, /mixamorigrightarm/i, /upper.*arm.*r/i]),
+    rightLowerArm: findBoneByPattern(root, [/^rightforearm_/i, /^lowerarmR$/i, /rightforearm/i, /right_lowerarm/i, /mixamorigrightforearm/i, /lower.*arm.*r/i]),
+    rightHand: findBoneByPattern(root, [/^righthand_/i, /^handR$/i, /righthand/i, /mixamorigrighthand/i, /hand.*r/i]),
+    leftUpperLeg: findBoneByPattern(root, [/^leftupleg_/i, /^upperlegL$/i, /leftupleg/i, /leftthigh/i, /mixamorigleftupleg/i, /upper.*leg.*l/i, /thigh.*l/i]),
+    leftLowerLeg: findBoneByPattern(root, [/^leftleg_/i, /^lowerlegL$/i, /leftleg/i, /leftcalf/i, /mixamorigleftleg/i, /lower.*leg.*l/i, /calf.*l/i]),
+    leftFoot: findBoneByPattern(root, [/^leftfoot_/i, /^footL$/i, /^tooseL$/i, /leftfoot/i, /mixamorigleftfoot/i, /foot.*l/i]),
+    rightUpperLeg: findBoneByPattern(root, [/^rightupleg_/i, /^upperlegR$/i, /rightupleg/i, /rightthigh/i, /mixamorigrightupleg/i, /upper.*leg.*r/i, /thigh.*r/i]),
+    rightLowerLeg: findBoneByPattern(root, [/^rightleg_/i, /^lowerlegR$/i, /rightleg/i, /rightcalf/i, /mixamorigrightleg/i, /lower.*leg.*r/i, /calf.*r/i]),
+    rightFoot: findBoneByPattern(root, [/^rightfoot_/i, /^footR$/i, /^tooseR$/i, /rightfoot/i, /mixamorigrightfoot/i, /foot.*r/i]),
+  }
+}
+
+function captureBoneRestPose(boneMap) {
+  const out = {}
+  for (const [name, bone] of Object.entries(boneMap || {})) {
+    if (!bone) continue
+    let aimAxisLocal = new THREE.Vector3(0, 1, 0)
+    const childBone = bone.children.find((child) => child?.isBone && child.position.lengthSq() > 1e-8)
+    if (childBone) {
+      aimAxisLocal = childBone.position.clone().normalize()
+    } else if (bone.position.lengthSq() > 1e-8) {
+      aimAxisLocal = bone.position.clone().normalize()
+    }
+    bone.userData.aimAxisLocal = aimAxisLocal.clone()
+    out[name] = {
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone(),
+      scale: bone.scale.clone(),
+      aimAxisLocal: aimAxisLocal.clone(),
+    }
+  }
+  return out
+}
+
+function restoreBoneRestPose(boneMap, restPose) {
+  for (const [name, bone] of Object.entries(boneMap || {})) {
+    if (!bone) continue
+    const rest = restPose?.[name]
+    if (!rest) continue
+    bone.position.copy(rest.position)
+    bone.quaternion.copy(rest.quaternion)
+    bone.scale.copy(rest.scale)
+    bone.userData.aimAxisLocal = rest.aimAxisLocal?.clone?.() || new THREE.Vector3(0, 1, 0)
   }
 }
 
@@ -233,23 +286,41 @@ function applyBoneDirection(bone, from, to) {
   bone.quaternion.copy(parentQuat.multiply(targetQuat))
 }
 
+function applyBoneDirectionWeighted(bone, from, to, weight = 1) {
+  if (!bone || !from || !to) return
+  const dir = new THREE.Vector3().subVectors(to, from)
+  if (dir.lengthSq() < 1e-8) return
+  dir.normalize()
+  const parentQuat = bone.parent?.getWorldQuaternion(new THREE.Quaternion()) || new THREE.Quaternion()
+  const aimAxis = bone.userData?.aimAxisLocal?.clone?.() || new THREE.Vector3(0, 1, 0)
+  if (aimAxis.lengthSq() < 1e-8) aimAxis.set(0, 1, 0)
+  aimAxis.normalize()
+  const targetQuat = new THREE.Quaternion().setFromUnitVectors(aimAxis, dir)
+  parentQuat.invert()
+  const localTarget = parentQuat.multiply(targetQuat)
+  bone.quaternion.slerp(localTarget, _clamp(weight, 0, 1))
+}
+
 function tintModel(root, color, isDark) {
   root.traverse((obj) => {
     if (!obj?.isMesh || !obj.material) return
+    obj.visible = true
     obj.frustumCulled = false
     obj.castShadow = false
     obj.receiveShadow = false
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
     mats.forEach((mat) => {
       if (mat?.color) mat.color.copy(color)
-      if (mat?.emissive) mat.emissive.copy(color).multiplyScalar(isDark ? 0.05 : 0.02)
+      if (mat?.emissive) mat.emissive.copy(color).multiplyScalar(isDark ? 0.18 : 0.08)
       if ('transparent' in mat) mat.transparent = true
-      if ('opacity' in mat) mat.opacity = 0.92
+      if ('opacity' in mat) mat.opacity = 1
+      if ('side' in mat) mat.side = THREE.DoubleSide
     })
   })
 }
 
 function normalizeModelPlacement(root) {
+  root.updateMatrixWorld(true)
   const box = new THREE.Box3().setFromObject(root)
   if (!box.isEmpty()) {
     const center = box.getCenter(new THREE.Vector3())
@@ -258,9 +329,17 @@ function normalizeModelPlacement(root) {
     root.position.z -= center.z
     root.position.y -= box.min.y
     const maxDim = Math.max(size.x || 1, size.y || 1, size.z || 1)
-    const targetHeight = 1.34
+    const targetHeight = MANNEQUIN_TARGET_HEIGHT
     const scale = targetHeight / Math.max(0.01, size.y || maxDim)
     root.scale.setScalar(scale)
+    root.updateMatrixWorld(true)
+    const groundedBox = new THREE.Box3().setFromObject(root)
+    if (!groundedBox.isEmpty()) {
+      const groundedCenter = groundedBox.getCenter(new THREE.Vector3())
+      root.position.x -= groundedCenter.x
+      root.position.z -= groundedCenter.z
+      root.position.y -= groundedBox.min.y
+    }
     root.userData.modelHeight = targetHeight
     root.userData.baseOffsetY = root.position.y
   }
@@ -276,12 +355,69 @@ function slerpQuaternion(target, next, alpha = 0.18) {
   target.slerp(next, alpha)
 }
 
-function currentIndex(videoEl, fallbackMs, frameCount, fps) {
-  if (!frameCount) return 0
-  if (videoEl && videoEl.readyState >= 2 && Number.isFinite(videoEl.currentTime)) {
-    return Math.max(0, Math.min(frameCount - 1, Math.floor(videoEl.currentTime * fps) % frameCount))
+function lerpNumber(a, b, t) {
+  const na = Number(a)
+  const nb = Number(b)
+  if (!Number.isFinite(na) && !Number.isFinite(nb)) return null
+  if (!Number.isFinite(na)) return nb
+  if (!Number.isFinite(nb)) return na
+  return na + (nb - na) * t
+}
+
+function interpolateCourtPos(a, b, t) {
+  if (!Array.isArray(a) && !Array.isArray(b)) return null
+  if (!Array.isArray(a)) return b
+  if (!Array.isArray(b)) return a
+  return [lerpNumber(a[0], b[0], t), lerpNumber(a[1], b[1], t)]
+}
+
+function interpolateKeypoints(aPoints, bPoints, keypointNames, t) {
+  const out = []
+  const maxLen = Math.max(
+    Array.isArray(aPoints) ? aPoints.length : 0,
+    Array.isArray(bPoints) ? bPoints.length : 0,
+    keypointNames.length,
+  )
+  for (let i = 0; i < maxLen; i++) {
+    const a = Array.isArray(aPoints) ? aPoints[i] : null
+    const b = Array.isArray(bPoints) ? bPoints[i] : null
+    const x = lerpNumber(a?.x, b?.x, t)
+    const y = lerpNumber(a?.y, b?.y, t)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+    out.push({
+      name: a?.name || b?.name || keypointNames[i] || `kp_${i}`,
+      x,
+      y,
+      confidence: lerpNumber(a?.confidence, b?.confidence, t) ?? 1,
+    })
   }
-  return Math.max(0, Math.min(frameCount - 1, Math.floor((fallbackMs / 1000) * fps) % frameCount))
+  return out
+}
+
+function interpolatePoseFrame(aFrame, bFrame, t, participants, keypointNames) {
+  const aPlayers = new Map((Array.isArray(aFrame?.players) ? aFrame.players : []).map((p) => [Number(p?.id), p]))
+  const bPlayers = new Map((Array.isArray(bFrame?.players) ? bFrame.players : []).map((p) => [Number(p?.id), p]))
+  const ids = participants.length ? participants : Array.from(new Set([...aPlayers.keys(), ...bPlayers.keys()]))
+
+  return {
+    players: ids
+      .map((pid) => {
+        const a = aPlayers.get(Number(pid))
+        const b = bPlayers.get(Number(pid))
+        if (!a && !b) return null
+        return {
+          id: Number(pid),
+          court_pos: interpolateCourtPos(a?.court_pos, b?.court_pos, t),
+          keypoints: interpolateKeypoints(a?.keypoints, b?.keypoints, keypointNames, t),
+        }
+      })
+      .filter(Boolean),
+    detections: Array.isArray(aFrame?.detections)
+      ? aFrame.detections
+      : Array.isArray(bFrame?.detections)
+        ? bFrame.detections
+        : [],
+  }
 }
 
 export default function RaidReplay3D({
@@ -298,10 +434,24 @@ export default function RaidReplay3D({
   const videoElRef = useRef(null)
   const imgElRef = useRef(null)
   const overlayCanvasRef = useRef(null)
+  const liveCameraRef = useRef(null)
+  const liveControlsRef = useRef(null)
   const [previewVideoOk, setPreviewVideoOk] = useState(true)
   const [stats, setStats] = useState({ detected: 0, matched: 0 })
   const [modelReady, setModelReady] = useState(false)
   const [modelError, setModelError] = useState(null)
+  const [boneDebugSummary, setBoneDebugSummary] = useState('')
+  const [scrollIndicator, setScrollIndicator] = useState(null)
+  const [cameraLocked, setCameraLocked] = useState(false)
+  const [previewMinimized, setPreviewMinimized] = useState(false)
+  const scrubValueRef = useRef(0)
+  const totalFramesRef = useRef(0)
+  const frameInfoRef = useRef({
+    activeFrameIndex: 0,
+    leftFrameIndex: 0,
+    rightFrameIndex: 0,
+    scrubMix: 0,
+  })
 
   const isDark = theme === 'dark'
   const keypointNames = Array.isArray(poseMeta?.keypoint_names) && poseMeta.keypoint_names.length
@@ -328,6 +478,101 @@ export default function RaidReplay3D({
     () => participantIdsForReplay(matWindow, poseWindow, event),
     [matWindow, poseWindow, event],
   )
+  const raiderId = useMemo(() => {
+    const mid = Array.isArray(matWindow) && matWindow.length ? matWindow[Math.floor(matWindow.length / 2)] : null
+    return _asInt(mid?.raider_id)
+  }, [matWindow])
+  const totalFrames = useMemo(
+    () =>
+      Math.max(
+        Array.isArray(matWindow) ? matWindow.length : 0,
+        Array.isArray(poseWindow) ? poseWindow.length : 0,
+      ),
+    [matWindow, poseWindow],
+  )
+  const [scrubValue, setScrubValue] = useState(0)
+  const scrubBaseIndex = Math.floor(scrubValue)
+  const scrubMix = Math.max(0, Math.min(1, scrubValue - scrubBaseIndex))
+  const leftFrameIndex = Math.min(scrubBaseIndex, Math.max(0, totalFrames - 1))
+  const rightFrameIndex = Math.min(scrubBaseIndex + 1, Math.max(0, totalFrames - 1))
+  const activeFrameFloat = Math.max(0, Math.min(Math.max(0, totalFrames - 1), scrubValue))
+  const activeFrameIndex = Math.round(activeFrameFloat)
+
+  useEffect(() => {
+    scrubValueRef.current = scrubValue
+    totalFramesRef.current = totalFrames
+    frameInfoRef.current = {
+      activeFrameIndex,
+      leftFrameIndex,
+      rightFrameIndex,
+      scrubMix,
+    }
+  }, [scrubValue, totalFrames, activeFrameIndex, leftFrameIndex, rightFrameIndex, scrubMix])
+
+  const lockCurrentView = () => {
+    try {
+      if (cameraLocked) {
+        window.localStorage.removeItem(RAID_REPLAY_CAMERA_LOCK_KEY)
+        setCameraLocked(false)
+        return
+      }
+      const camera = liveCameraRef.current
+      const controls = liveControlsRef.current
+      if (!camera || !controls) return
+      window.localStorage.setItem(
+        RAID_REPLAY_CAMERA_LOCK_KEY,
+        JSON.stringify({
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target: [controls.target.x, controls.target.y, controls.target.z],
+        }),
+      )
+      setCameraLocked(true)
+    } catch {
+      // ignore camera lock write failures
+    }
+  }
+
+  useEffect(() => {
+    try {
+      setCameraLocked(Boolean(window.localStorage.getItem(RAID_REPLAY_CAMERA_LOCK_KEY)))
+    } catch {
+      setCameraLocked(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    setScrubValue(0)
+    setScrollIndicator(null)
+  }, [totalFrames])
+
+  useEffect(() => {
+    if (!scrollIndicator) return
+    const timer = window.setTimeout(() => setScrollIndicator(null), 900)
+    return () => window.clearTimeout(timer)
+  }, [scrollIndicator])
+
+  useEffect(() => {
+    const videoEl = videoElRef.current
+    if (!videoEl || !previewVideoOk || !totalFrames) return
+    const nextTime = activeFrameFloat / 30
+    const applySeek = () => {
+      try {
+        videoEl.pause()
+        videoEl.currentTime = nextTime
+      } catch {
+        // ignore
+      }
+    }
+    if (videoEl.readyState >= 1) {
+      applySeek()
+      return
+    }
+    const onMeta = () => applySeek()
+    videoEl.addEventListener('loadedmetadata', onMeta, { once: true })
+    return () => {
+      videoEl.removeEventListener('loadedmetadata', onMeta)
+    }
+  }, [activeFrameFloat, previewVideoOk, totalFrames])
 
   useEffect(() => {
     const canvas = overlayCanvasRef.current
@@ -335,7 +580,6 @@ export default function RaidReplay3D({
     const imgEl = imgElRef.current
     if (!canvas) return
 
-    let raf = 0
     const draw = () => {
       const ctx = canvas.getContext('2d')
       const cw = canvas.clientWidth || 1
@@ -361,8 +605,13 @@ export default function RaidReplay3D({
         const h = mediaH * s
         const ox = (cw - w) / 2
         const oy = (ch - h) / 2
-        const idx = currentIndex(videoEl, 0, poseWindow.length, 30)
-        const poseFrame = poseWindow[idx] || {}
+        const poseFrame = interpolatePoseFrame(
+          poseWindow[leftFrameIndex] || {},
+          poseWindow[rightFrameIndex] || {},
+          scrubMix,
+          participants,
+          keypointNames,
+        )
         const players = Array.isArray(poseFrame.players) ? poseFrame.players : []
         setStats({
           detected: Array.isArray(poseFrame.detections) ? poseFrame.detections.length : players.length,
@@ -404,14 +653,10 @@ export default function RaidReplay3D({
       }
 
       ctx.restore()
-      raf = requestAnimationFrame(draw)
     }
 
-    raf = requestAnimationFrame(draw)
-    return () => {
-      if (raf) cancelAnimationFrame(raf)
-    }
-  }, [poseWindow, keypointNames, skeletonEdges, isDark, previewVideoOk])
+    draw()
+  }, [poseWindow, keypointNames, skeletonEdges, isDark, previewVideoOk, leftFrameIndex, rightFrameIndex, scrubMix, participants])
 
   useEffect(() => {
     const el = mountRef.current
@@ -425,11 +670,14 @@ export default function RaidReplay3D({
 
     const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 200)
     const controls = new OrbitControls(camera, renderer.domElement)
+    liveCameraRef.current = camera
+    liveControlsRef.current = controls
     controls.enableDamping = true
     controls.dampingFactor = 0.08
     controls.minDistance = 2.5
     controls.maxDistance = 20
     controls.maxPolarAngle = Math.PI * 0.49
+    controls.enableZoom = false
 
     const ambient = new THREE.AmbientLight(0xffffff, isDark ? 0.3 : 0.38)
     scene.add(ambient)
@@ -500,6 +748,20 @@ export default function RaidReplay3D({
     camDir.normalize()
     camera.position.set(focus.x + camDir.x * 8.5, 5.6, focus.z + camDir.z * 8.5)
     camera.lookAt(focus)
+    try {
+      const raw = window.localStorage.getItem(RAID_REPLAY_CAMERA_LOCK_KEY)
+      if (raw) {
+        const saved = JSON.parse(raw)
+        const savedPos = Array.isArray(saved?.position) ? saved.position : null
+        const savedTarget = Array.isArray(saved?.target) ? saved.target : null
+        if (savedPos?.length === 3 && savedTarget?.length === 3) {
+          camera.position.set(Number(savedPos[0]) || 0, Number(savedPos[1]) || 0, Number(savedPos[2]) || 0)
+          controls.target.set(Number(savedTarget[0]) || 0, Number(savedTarget[1]) || 0, Number(savedTarget[2]) || 0)
+        }
+      }
+    } catch {
+      // ignore camera lock read failures
+    }
     controls.update()
 
     const tmpMid = new THREE.Vector3()
@@ -511,16 +773,18 @@ export default function RaidReplay3D({
     const mannequinGroup = new THREE.Group()
     scene.add(mannequinGroup)
 
-    const rigColor = (idx) =>
-      idx === 0
-        ? new THREE.Color(isDark ? 0xf5deb3 : 0x8b6b2f)
-        : idx === 1
-          ? new THREE.Color(isDark ? 0xe2e8f0 : 0x1f2937)
-          : new THREE.Color(isDark ? 0x94a3b8 : 0x475569)
+    const rigColor = (idx, pid) =>
+      Number(pid) === Number(raiderId)
+        ? new THREE.Color(isDark ? 0xfbbf24 : 0xb45309)
+        : idx === 0
+          ? new THREE.Color(isDark ? 0xf5deb3 : 0x8b6b2f)
+          : idx === 1
+            ? new THREE.Color(isDark ? 0xe2e8f0 : 0x1f2937)
+            : new THREE.Color(isDark ? 0x94a3b8 : 0x475569)
 
     for (let i = 0; i < participants.length; i++) {
       const pid = Number(participants[i])
-      const color = rigColor(i)
+      const color = rigColor(i, pid)
       const lineMaterial = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.96 })
       const lineGeometry = new THREE.BufferGeometry()
       lineGeometry.setAttribute(
@@ -544,18 +808,46 @@ export default function RaidReplay3D({
         joints.set(name, joint)
       }
       rigGroup.add(lineSegments)
-      rigs.set(pid, { lineSegments, lineGeometry, lineMaterial, joints, jointMaterial, mannequin: null, boneMap: null })
+      rigs.set(pid, {
+        index: i,
+        id: pid,
+        lineSegments,
+        lineGeometry,
+        lineMaterial,
+        joints,
+        jointMaterial,
+        mannequin: null,
+        boneMap: null,
+        restPose: null,
+        label: null,
+        labelTexture: null,
+        labelMaterial: null,
+        lastValidPosition: null,
+        lastValidQuaternion: null,
+      })
     }
 
     let alive = true
     loadMannequinAsset()
       .then((gltf) => {
         if (!alive) return
+        if (!mannequinBoneDebugPrinted) {
+          const boneNames = listBoneNames(gltf.scene)
+          mannequinBoneDebugPrinted = true
+          console.groupCollapsed(`[${MANNEQUIN_ASSET_LABEL}] Bone names`)
+          boneNames.forEach((name, idx) => console.log(`${idx}: ${name}`))
+          console.groupEnd()
+          setBoneDebugSummary(
+            boneNames.length
+              ? `${boneNames.length} bones | ${boneNames.slice(0, 6).join(', ')}${boneNames.length > 6 ? ' ...' : ''}`
+              : `No bones found in ${MANNEQUIN_ASSET_LABEL}`,
+          )
+        }
         participants.forEach((pid, idx) => {
           const rig = rigs.get(Number(pid))
           if (!rig || rig.mannequin) return
           const root = skeletonClone(gltf.scene)
-          const color = rigColor(idx)
+          const color = rigColor(idx, pid)
           tintModel(root, color, isDark)
           normalizeModelPlacement(root)
           const boneMap = buildBoneMap(root)
@@ -571,9 +863,35 @@ export default function RaidReplay3D({
           const anchor = new THREE.Group()
           anchor.position.set(0, 0, 0)
           anchor.add(root)
+          const labelAsset = makeTextSprite(
+            Number(pid) === Number(raiderId) ? `RAIDER ${pid}` : `ID ${pid}`,
+            isDark ? 'dark' : 'light',
+          )
+          labelAsset.sprite.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
+          anchor.add(labelAsset.sprite)
+          if (Number(pid) === Number(raiderId)) {
+            const ringGeom = new THREE.RingGeometry(0.18, 0.28, 32)
+            const ringMat = new THREE.MeshBasicMaterial({
+              color: isDark ? 0xfbbf24 : 0xb45309,
+              transparent: true,
+              opacity: 0.9,
+              side: THREE.DoubleSide,
+            })
+            const ring = new THREE.Mesh(ringGeom, ringMat)
+            ring.rotation.x = -Math.PI / 2
+            ring.position.set(0, 0.012, 0)
+            anchor.add(ring)
+            rig.raiderRing = ring
+            rig.raiderRingMaterial = ringMat
+            rig.raiderRingGeometry = ringGeom
+          }
           mannequinGroup.add(anchor)
           rig.mannequin = anchor
           rig.boneMap = boneMap
+          rig.restPose = captureBoneRestPose(boneMap)
+          rig.label = labelAsset.sprite
+          rig.labelTexture = labelAsset.texture
+          rig.labelMaterial = labelAsset.material
         })
         setModelReady(true)
         setModelError(null)
@@ -584,47 +902,22 @@ export default function RaidReplay3D({
         setModelError(String(err?.message || err))
       })
 
-    let held = false
-    let fallbackMs = 0
-    let lastMs = performance.now()
-    const videoEl = videoElRef.current
-
-    const onStart = () => {
-      held = true
-      try {
-        if (videoEl && previewVideoOk) videoEl.pause()
-      } catch {
-        // ignore
-      }
-    }
-    const onEnd = () => {
-      held = false
-      lastMs = performance.now()
-      try {
-        if (videoEl && previewVideoOk && typeof videoEl.play === 'function') {
-          const playPromise = videoEl.play()
-          if (playPromise && typeof playPromise.catch === 'function') {
-            playPromise.catch(() => {
-              setPreviewVideoOk(false)
-            })
-          }
-        }
-      } catch {
-        setPreviewVideoOk(false)
-      }
-    }
-    controls.addEventListener('start', onStart)
-    controls.addEventListener('end', onEnd)
-
     let raf = 0
     const animate = () => {
-      const now = performance.now()
-      if (!held) fallbackMs += now - lastMs
-      lastMs = now
-
-      const idx = currentIndex(videoEl, fallbackMs, matWindow.length, 30)
-      const matFrame = matWindow[idx] || {}
-      const poseFrame = Array.isArray(poseWindow) ? poseWindow[idx] || {} : {}
+      const {
+        activeFrameIndex: currentActiveFrameIndex,
+        leftFrameIndex: currentLeftFrameIndex,
+        rightFrameIndex: currentRightFrameIndex,
+        scrubMix: currentScrubMix,
+      } = frameInfoRef.current
+      const matFrame = matWindow[currentActiveFrameIndex] || {}
+      const poseFrame = interpolatePoseFrame(
+        Array.isArray(poseWindow) ? poseWindow[currentLeftFrameIndex] || {} : {},
+        Array.isArray(poseWindow) ? poseWindow[currentRightFrameIndex] || {} : {},
+        currentScrubMix,
+        participants,
+        keypointNames,
+      )
       const posePlayers = Array.isArray(poseFrame.players) ? poseFrame.players : []
       const poseById = new Map(posePlayers.map((player) => [Number(player?.id), player]))
       const matPlayers = Array.isArray(matFrame.players) ? matFrame.players : []
@@ -639,12 +932,36 @@ export default function RaidReplay3D({
         const root = posFromCourt(posePlayer?.court_pos || tracked?.court_pos)
         const positions = rig.lineGeometry.attributes.position.array
 
-        if (!posePlayer || !root) {
+        if (!root) {
           rig.lineSegments.visible = false
           rig.joints.forEach((joint) => {
             joint.visible = false
           })
-          if (rig.mannequin) rig.mannequin.visible = false
+          if (rig.mannequin) {
+            if (rig.lastValidPosition) {
+              rig.mannequin.visible = true
+              rig.mannequin.position.copy(rig.lastValidPosition)
+              if (rig.lastValidQuaternion) rig.mannequin.quaternion.copy(rig.lastValidQuaternion)
+              if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
+            } else {
+              rig.mannequin.visible = false
+            }
+          }
+          continue
+        }
+
+        if (!posePlayer) {
+          rig.lineSegments.visible = false
+          rig.joints.forEach((joint) => {
+            joint.visible = false
+          })
+          if (rig.mannequin) {
+            rig.mannequin.visible = true
+            const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
+            rig.mannequin.position.copy(fallbackPos)
+            rig.lastValidPosition = fallbackPos.clone()
+            if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
+          }
           continue
         }
 
@@ -661,7 +978,14 @@ export default function RaidReplay3D({
           rig.joints.forEach((joint) => {
             joint.visible = false
           })
-          if (rig.mannequin) rig.mannequin.visible = false
+          if (rig.mannequin) {
+            rig.mannequin.visible = true
+            const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
+            rig.mannequin.position.copy(fallbackPos)
+            rig.lastValidPosition = fallbackPos.clone()
+            if (rig.lastValidQuaternion) rig.mannequin.quaternion.copy(rig.lastValidQuaternion)
+            if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
+          }
           continue
         }
 
@@ -712,6 +1036,7 @@ export default function RaidReplay3D({
 
         if (rig.mannequin && rig.boneMap) {
           rig.mannequin.visible = true
+          restoreBoneRestPose(rig.boneMap, rig.restPose)
           const leftShoulder3 = to3(map.get('left_shoulder'))
           const rightShoulder3 = to3(map.get('right_shoulder'))
           const leftElbow3 = to3(map.get('left_elbow'))
@@ -724,8 +1049,9 @@ export default function RaidReplay3D({
           const rightAnkle3 = to3(map.get('right_ankle'))
           const hip3 = to3(hipMid || midpoint(leftHip, rightHip))
           if (hip3) {
-            const desiredPos = new THREE.Vector3(root.x, 0, root.z)
-            lerpVector3(rig.mannequin.position, desiredPos, 0.24)
+            const desiredPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
+            rig.mannequin.position.copy(desiredPos)
+            rig.lastValidPosition = desiredPos.clone()
             const shoulderSpan = midpoint(leftShoulder3, rightShoulder3)
             const hipSpan = midpoint(to3(map.get('left_hip')), to3(map.get('right_hip')))
             const facingBase = shoulderSpan || hipSpan
@@ -735,39 +1061,39 @@ export default function RaidReplay3D({
               if (forward.lengthSq() > 1e-6) {
                 const yaw = Math.atan2(forward.x, forward.z)
                 const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
-                slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.18)
+                rig.mannequin.quaternion.copy(targetQuat)
+                rig.lastValidQuaternion = targetQuat.clone()
               }
             }
             if (rig.boneMap.hips) {
-              rig.boneMap.hips.position.x = 0
-              rig.boneMap.hips.position.z = 0
+              const restHips = rig.restPose?.hips?.position
+              rig.boneMap.hips.position.x = restHips?.x ?? 0
+              rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
+              rig.boneMap.hips.position.z = restHips?.z ?? 0
             }
+          }
+          if (rig.label) {
+            const head3 = to3(map.get('nose')) || to3(map.get('left_eye')) || to3(map.get('right_eye'))
+            const headHeight = head3 ? Math.max(1.15, head3.y + 0.28) : MANNEQUIN_TARGET_HEIGHT + 0.28
+            rig.label.position.set(0, headHeight, 0)
           }
 
           const chest3 = midpoint(leftShoulder3, rightShoulder3)
 
-          applyBoneDirection(rig.boneMap.spine, hip3, chest3)
-          applyBoneDirection(rig.boneMap.chest, chest3, neck || chest3)
-          applyBoneDirection(rig.boneMap.neck, chest3, neck || chest3)
+          // Safer subset for this custom rig: avoid over-driving shoulder/hand/foot/head chains,
+          // which can collapse one side of the skinned mesh when local axes differ.
+          applyBoneDirectionWeighted(rig.boneMap.spine, hip3, chest3, 0.12)
+          applyBoneDirectionWeighted(rig.boneMap.chest, hip3, chest3, 0.1)
 
-          applyBoneDirection(rig.boneMap.leftUpperArm, leftShoulder3, leftElbow3)
-          applyBoneDirection(rig.boneMap.leftLowerArm, leftElbow3, leftWrist3)
-          applyBoneDirection(rig.boneMap.leftHand, leftElbow3, leftWrist3)
-          applyBoneDirection(rig.boneMap.rightUpperArm, rightShoulder3, rightElbow3)
-          applyBoneDirection(rig.boneMap.rightLowerArm, rightElbow3, rightWrist3)
-          applyBoneDirection(rig.boneMap.rightHand, rightElbow3, rightWrist3)
+          applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, leftShoulder3, leftElbow3, 0.42)
+          applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, leftElbow3, leftWrist3, 0.5)
+          applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, rightShoulder3, rightElbow3, 0.42)
+          applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, rightElbow3, rightWrist3, 0.5)
 
-          applyBoneDirection(rig.boneMap.leftUpperLeg, hip3, leftKnee3)
-          applyBoneDirection(rig.boneMap.leftLowerLeg, leftKnee3, leftAnkle3)
-          applyBoneDirection(rig.boneMap.leftFoot, leftKnee3, leftAnkle3)
-          applyBoneDirection(rig.boneMap.rightUpperLeg, hip3, rightKnee3)
-          applyBoneDirection(rig.boneMap.rightLowerLeg, rightKnee3, rightAnkle3)
-          applyBoneDirection(rig.boneMap.rightFoot, rightKnee3, rightAnkle3)
-          if (rig.boneMap.head) {
-            rig.boneMap.head.rotation.x *= 0.7
-            rig.boneMap.head.rotation.y *= 0.7
-            rig.boneMap.head.rotation.z *= 0.7
-          }
+          applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, hip3, leftKnee3, 0.34)
+          applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, leftKnee3, leftAnkle3, 0.44)
+          applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, hip3, rightKnee3, 0.34)
+          applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, rightKnee3, rightAnkle3, 0.44)
         }
       }
 
@@ -783,8 +1109,36 @@ export default function RaidReplay3D({
       camera.aspect = w / h
       camera.updateProjectionMatrix()
     }
+    const onWheel = (ev) => {
+      const delta = Number(ev.deltaY || 0)
+      if (ev.ctrlKey) {
+        ev.preventDefault()
+        const zoomStep = delta > 0 ? 0.7 : -0.7
+        const offset = new THREE.Vector3().subVectors(camera.position, controls.target)
+        const distance = offset.length()
+        const nextDistance = Math.max(controls.minDistance, Math.min(controls.maxDistance, distance + zoomStep))
+        if (distance > 1e-6) {
+          offset.setLength(nextDistance)
+          camera.position.copy(controls.target.clone().add(offset))
+        }
+        controls.update()
+        return
+      }
+      if (totalFrames <= 1) return
+      ev.preventDefault()
+      // Scroll down -> forward in time, scroll up -> backward in time.
+      const direction = delta === 0 ? 0 : delta > 0 ? 1 : -1
+      const frameCount = totalFramesRef.current
+      const next = Math.max(0, Math.min(frameCount - 1, scrubValueRef.current + direction))
+      setScrubValue(next)
+      setScrollIndicator({
+        frame: Math.round(next),
+        direction,
+      })
+    }
     const ro = new ResizeObserver(resize)
     ro.observe(el)
+    renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
     resize()
     raf = requestAnimationFrame(animate)
 
@@ -792,8 +1146,7 @@ export default function RaidReplay3D({
       alive = false
       if (raf) cancelAnimationFrame(raf)
       try {
-        controls.removeEventListener('start', onStart)
-        controls.removeEventListener('end', onEnd)
+        renderer.domElement.removeEventListener('wheel', onWheel)
       } catch {
         // ignore
       }
@@ -802,6 +1155,8 @@ export default function RaidReplay3D({
       } catch {
         // ignore
       }
+      liveCameraRef.current = null
+      liveControlsRef.current = null
       try {
         ro.disconnect()
       } catch {
@@ -820,6 +1175,26 @@ export default function RaidReplay3D({
         }
         try {
           rig.jointMaterial.dispose()
+        } catch {
+          // ignore
+        }
+        try {
+          rig.labelTexture?.dispose?.()
+        } catch {
+          // ignore
+        }
+        try {
+          rig.labelMaterial?.dispose?.()
+        } catch {
+          // ignore
+        }
+        try {
+          rig.raiderRingGeometry?.dispose?.()
+        } catch {
+          // ignore
+        }
+        try {
+          rig.raiderRingMaterial?.dispose?.()
         } catch {
           // ignore
         }
@@ -906,33 +1281,64 @@ export default function RaidReplay3D({
         3D stick-figure replay from archived YOLO poses
       </div>
       <div className="pointer-events-none absolute left-3 top-12 z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
-        poses {stats.detected} | matched {stats.matched}
+        poses {stats.detected} | matched {stats.matched} | frame {activeFrameIndex}
       </div>
       <div className="pointer-events-none absolute left-3 top-[84px] z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
         mannequin {modelReady ? 'ready' : modelError ? 'fallback' : 'loading'}
       </div>
+      <div className="pointer-events-none absolute left-3 top-[120px] z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
+        scroll: frames | Ctrl + scroll: zoom
+      </div>
+      <button
+        type="button"
+        onClick={lockCurrentView}
+        className="absolute right-3 top-14 z-30 rounded-full border border-white/10 bg-black/45 px-3 py-1 text-[11px] font-semibold text-white backdrop-blur transition hover:bg-black/60"
+      >
+        {cameraLocked ? 'Locked' : 'Lock'}
+      </button>
+      {boneDebugSummary ? (
+        <div className="pointer-events-none absolute left-3 top-[156px] z-20 max-w-[42rem] rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-[11px] font-medium text-white/90 backdrop-blur">
+          {MANNEQUIN_ASSET_LABEL} bones: {boneDebugSummary}
+        </div>
+      ) : null}
+      {scrollIndicator ? (
+        <div className="pointer-events-none absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full border border-white/10 bg-black/55 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur">
+          Frame {scrollIndicator.frame}
+          {scrollIndicator.direction < 0 ? ' | reverse' : scrollIndicator.direction > 0 ? ' | forward' : ''}
+        </div>
+      ) : null}
 
       <div
         className="absolute bottom-4 right-4 z-20 overflow-hidden rounded-2xl border border-white/10 bg-black/35 shadow-2xl backdrop-blur"
         style={{
-          width: 'min(560px, 40vw)',
-          height: 'min(320px, 28vw)',
-          minWidth: 360,
-          minHeight: 220,
+          width: previewMinimized ? 132 : 'min(560px, 40vw)',
+          height: previewMinimized ? 42 : 'min(320px, 28vw)',
+          minWidth: previewMinimized ? 132 : 360,
+          minHeight: previewMinimized ? 42 : 220,
         }}
       >
+        <button
+          type="button"
+          onClick={() => setPreviewMinimized((prev) => !prev)}
+          className="absolute right-2 top-2 z-30 rounded-full border border-white/10 bg-black/55 px-2 py-1 text-[10px] font-semibold text-white backdrop-blur transition hover:bg-black/70"
+        >
+          {previewMinimized ? 'Expand Video' : 'Minimize Video'}
+        </button>
+        {previewMinimized ? (
+          <div className="flex h-full w-full items-center justify-start px-3 text-[11px] font-medium text-white/85">
+            Preview video minimized
+          </div>
+        ) : null}
         {videoFileSrc ? (
           <video
             ref={videoElRef}
             src={videoFileSrc}
             className="absolute inset-0 h-full w-full object-contain"
-            autoPlay
-            loop
             muted
             playsInline
             preload="auto"
             onError={() => setPreviewVideoOk(false)}
-            style={{ display: previewVideoOk ? 'block' : 'none' }}
+            style={{ display: previewMinimized ? 'none' : previewVideoOk ? 'block' : 'none' }}
           />
         ) : null}
         {videoSrc ? (
@@ -943,13 +1349,13 @@ export default function RaidReplay3D({
             className="absolute inset-0 h-full w-full object-contain"
             loading="eager"
             decoding="async"
-            style={{ display: previewVideoOk && videoFileSrc ? 'none' : 'block' }}
+            style={{ display: previewMinimized ? 'none' : previewVideoOk && videoFileSrc ? 'none' : 'block' }}
           />
         ) : null}
         <canvas
           ref={overlayCanvasRef}
           className="absolute inset-0 h-full w-full"
-          style={{ pointerEvents: 'none' }}
+          style={{ pointerEvents: 'none', display: previewMinimized ? 'none' : 'block' }}
         />
       </div>
 
@@ -960,7 +1366,7 @@ export default function RaidReplay3D({
       ) : null}
       {modelError ? (
         <div className="absolute bottom-16 left-4 z-20 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs text-amber-900 shadow-sm dark:border-amber-900/60 dark:bg-amber-950/50 dark:text-amber-100">
-          Could not load or rig `man.glb`. Showing stick-figure fallback. {modelError}
+          Could not load or rig `{MANNEQUIN_ASSET_LABEL}`. Showing stick-figure fallback. {modelError}
         </div>
       ) : null}
     </div>

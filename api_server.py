@@ -557,8 +557,16 @@ def latest_videos():
     videos_dir = _videos_dir()
     videos_dir.mkdir(parents=True, exist_ok=True)
 
-    processed = _latest_video("processed_*.mp4")
-    report = _latest_video("confirmed_report_*.mp4")
+    processed = (
+        _latest_video("processed_sequence_latest.mp4")
+        or _latest_video("processed_sequence_*.mp4")
+        or _latest_video("processed_*.mp4")
+    )
+    report = (
+        _latest_video("confirmed_report_sequence_latest.mp4")
+        or _latest_video("confirmed_report_sequence_*.mp4")
+        or _latest_video("confirmed_report_*.mp4")
+    )
     return {
         "processed": processed.name if processed else None,
         "report": report.name if report else None,
@@ -581,7 +589,14 @@ def archive_events():
     events = payload.get("events", [])
     if not isinstance(events, list):
         events = []
-    return {"events": events}
+    return {
+        "events": events,
+        "raid_summaries": payload.get("raid_summaries", []),
+        "team_scores": payload.get("team_scores", {}),
+        "raid_label": payload.get("raid_label"),
+        "raid_index": payload.get("raid_index"),
+        "attacking_team": payload.get("attacking_team"),
+    }
 
 
 @app.get("/api/videos/file/{filename}")

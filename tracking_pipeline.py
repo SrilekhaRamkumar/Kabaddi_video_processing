@@ -92,23 +92,54 @@ def apply_optical_flow(prev_gray, gray, gallery):
     for _, data in gallery.items():
         if data["flow_pts"] is None:
             continue
-        new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
-            prev_gray,
-            gray,
-            data["flow_pts"],
-            None,
-            winSize=(15, 15),
-            maxLevel=2,
-        )
-        if new_pts is None:
+
+        try:
+            pts = np.asarray(data["flow_pts"], dtype=np.float32)
+            if pts.size == 0:
+                data["flow_pts"] = None
+                continue
+            pts = pts.reshape(-1, 1, 2)
+            if len(pts) > 32:
+                pts = pts[:32]
+            data["flow_pts"] = pts
+
+            new_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+                prev_gray,
+                gray,
+                pts,
+                None,
+                winSize=(15, 15),
+                maxLevel=2,
+            )
+        except cv2.error:
+            data["flow_pts"] = None
             continue
-        good_new = new_pts[status == 1]
-        good_old = data["flow_pts"][status == 1]
+        except MemoryError:
+            data["flow_pts"] = None
+            continue
+
+        if new_pts is None:
+            data["flow_pts"] = None
+            continue
+
+        try:
+            status_mask = status.reshape(-1) == 1 if status is not None else None
+            if status_mask is None:
+                data["flow_pts"] = None
+                continue
+            good_new = new_pts.reshape(-1, 2)[status_mask]
+            good_old = pts.reshape(-1, 2)[status_mask]
+        except Exception:
+            data["flow_pts"] = None
+            continue
+
         if len(good_new) > 5:
             dx, dy = np.mean(good_new - good_old, axis=0)
             data["kf"].statePost[0] += dx
             data["kf"].statePost[1] += dy
-            data["flow_pts"] = good_new.reshape(-1, 1, 2)
+            data["flow_pts"] = good_new[:32].reshape(-1, 1, 2).astype(np.float32)
+        else:
+            data["flow_pts"] = None
 
 
 def run_yolo_detection(model, frame, device, conf_thresh):

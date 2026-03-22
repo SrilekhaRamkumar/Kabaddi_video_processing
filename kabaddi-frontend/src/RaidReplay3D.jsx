@@ -168,6 +168,15 @@ function estimateScaleMeters(poseMap) {
   return 1.68 / span
 }
 
+function hasValidCourtPos(player) {
+  return (
+    Array.isArray(player?.court_pos) &&
+    player.court_pos.length >= 2 &&
+    Number.isFinite(Number(player.court_pos[0])) &&
+    Number.isFinite(Number(player.court_pos[1]))
+  )
+}
+
 function participantIdsForReplay(matWindow, poseWindow, event) {
   const ids = new Set()
   const mid = Array.isArray(matWindow) && matWindow.length ? matWindow[Math.floor(matWindow.length / 2)] : null
@@ -444,7 +453,9 @@ export default function RaidReplay3D({
   const [scrollIndicator, setScrollIndicator] = useState(null)
   const [cameraLocked, setCameraLocked] = useState(false)
   const [previewMinimized, setPreviewMinimized] = useState(false)
+  const [hoveredCard, setHoveredCard] = useState(null)
   const scrubValueRef = useRef(0)
+  const renderScrubRef = useRef(0)
   const totalFramesRef = useRef(0)
   const frameInfoRef = useRef({
     activeFrameIndex: 0,
@@ -452,6 +463,10 @@ export default function RaidReplay3D({
     rightFrameIndex: 0,
     scrubMix: 0,
   })
+  const pointerRef = useRef(new THREE.Vector2(2, 2))
+  const hoverPointRef = useRef({ x: 0, y: 0 })
+  const hoveredDataRef = useRef(null)
+  const lastHoverSignatureRef = useRef('')
 
   const isDark = theme === 'dark'
   const keypointNames = Array.isArray(poseMeta?.keypoint_names) && poseMeta.keypoint_names.length
@@ -482,21 +497,33 @@ export default function RaidReplay3D({
     const mid = Array.isArray(matWindow) && matWindow.length ? matWindow[Math.floor(matWindow.length / 2)] : null
     return _asInt(mid?.raider_id)
   }, [matWindow])
+  const validFrameIndices = useMemo(() => {
+    if (!Array.isArray(matWindow) || matWindow.length === 0) return []
+    if (!Array.isArray(participants) || participants.length === 0) {
+      return matWindow.map((_, idx) => idx)
+    }
+    const out = []
+    for (let i = 0; i < matWindow.length; i++) {
+      const players = Array.isArray(matWindow[i]?.players) ? matWindow[i].players : []
+      const ok = participants.every((pid) =>
+        players.some((player) => Number(player?.id) === Number(pid) && hasValidCourtPos(player)),
+      )
+      if (ok) out.push(i)
+    }
+    return out
+  }, [matWindow, participants])
   const totalFrames = useMemo(
-    () =>
-      Math.max(
-        Array.isArray(matWindow) ? matWindow.length : 0,
-        Array.isArray(poseWindow) ? poseWindow.length : 0,
-      ),
-    [matWindow, poseWindow],
+    () => validFrameIndices.length,
+    [validFrameIndices],
   )
   const [scrubValue, setScrubValue] = useState(0)
   const scrubBaseIndex = Math.floor(scrubValue)
   const scrubMix = Math.max(0, Math.min(1, scrubValue - scrubBaseIndex))
-  const leftFrameIndex = Math.min(scrubBaseIndex, Math.max(0, totalFrames - 1))
-  const rightFrameIndex = Math.min(scrubBaseIndex + 1, Math.max(0, totalFrames - 1))
+  const leftFrameIndex = validFrameIndices[Math.min(scrubBaseIndex, Math.max(0, totalFrames - 1))] ?? 0
+  const rightFrameIndex =
+    validFrameIndices[Math.min(scrubBaseIndex + 1, Math.max(0, totalFrames - 1))] ?? leftFrameIndex
   const activeFrameFloat = Math.max(0, Math.min(Math.max(0, totalFrames - 1), scrubValue))
-  const activeFrameIndex = Math.round(activeFrameFloat)
+  const activeFrameIndex = validFrameIndices[Math.round(activeFrameFloat)] ?? 0
 
   useEffect(() => {
     scrubValueRef.current = scrubValue
@@ -542,6 +569,7 @@ export default function RaidReplay3D({
 
   useEffect(() => {
     setScrubValue(0)
+    renderScrubRef.current = 0
     setScrollIndicator(null)
   }, [totalFrames])
 
@@ -728,7 +756,7 @@ export default function RaidReplay3D({
       return new THREE.Vector3(cx - meta.courtW / 2, 0, (meta.courtH - cy) - meta.courtH / 2)
     }
 
-    const mid = matWindow[Math.floor(matWindow.length / 2)] || {}
+    const mid = matWindow[validFrameIndices[Math.floor(validFrameIndices.length / 2)] ?? Math.floor(matWindow.length / 2)] || {}
     const midPlayers = Array.isArray(mid.players) ? mid.players : []
     const focusTargets = participants
       .map((pid) => {
@@ -740,6 +768,12 @@ export default function RaidReplay3D({
       focusTargets.length > 0
         ? focusTargets.reduce((acc, v) => acc.add(v), new THREE.Vector3()).multiplyScalar(1 / focusTargets.length)
         : new THREE.Vector3(0, 0, 0)
+    const firstValidFrameIdx = validFrameIndices[0] ?? 0
+    const firstPlayers = Array.isArray(matWindow?.[firstValidFrameIdx]?.players) ? matWindow[firstValidFrameIdx].players : []
+    const firstPositionFor = (pid) => {
+      const match = firstPlayers.find((player) => Number(player?.id) === Number(pid))
+      return posFromCourt(match?.court_pos)
+    }
     controls.target.copy(focus)
     const camDir =
       String(meta.camera).toLowerCase().includes('cam2')
@@ -766,6 +800,7 @@ export default function RaidReplay3D({
 
     const tmpMid = new THREE.Vector3()
     const tmpDir = new THREE.Vector3()
+    const raycaster = new THREE.Raycaster()
     const jointGeom = new THREE.SphereGeometry(0.045, 10, 10)
     const rigGroup = new THREE.Group()
     scene.add(rigGroup)
@@ -850,6 +885,9 @@ export default function RaidReplay3D({
           const color = rigColor(idx, pid)
           tintModel(root, color, isDark)
           normalizeModelPlacement(root)
+          root.traverse((obj) => {
+            if (obj?.isMesh) obj.userData.playerId = Number(pid)
+          })
           const boneMap = buildBoneMap(root)
           if (boneMap.hips) {
             const hipDrop = Math.max(0, Number(boneMap.hips.position.y || 0)) * Number(root.scale.y || 1) * 0.92
@@ -861,7 +899,11 @@ export default function RaidReplay3D({
             root.position.y -= groundedBox.min.y
           }
           const anchor = new THREE.Group()
-          anchor.position.set(0, 0, 0)
+          const initialCourtPos = firstPositionFor(pid)
+          const initialAnchorPos = initialCourtPos
+            ? new THREE.Vector3(initialCourtPos.x, MANNEQUIN_Y_OFFSET, initialCourtPos.z + MANNEQUIN_Z_OFFSET)
+            : new THREE.Vector3(0, MANNEQUIN_Y_OFFSET, 0)
+          anchor.position.copy(initialAnchorPos)
           anchor.add(root)
           const labelAsset = makeTextSprite(
             Number(pid) === Number(raiderId) ? `RAIDER ${pid}` : `ID ${pid}`,
@@ -880,6 +922,7 @@ export default function RaidReplay3D({
             const ring = new THREE.Mesh(ringGeom, ringMat)
             ring.rotation.x = -Math.PI / 2
             ring.position.set(0, 0.012, 0)
+            ring.userData.playerId = Number(pid)
             anchor.add(ring)
             rig.raiderRing = ring
             rig.raiderRingMaterial = ringMat
@@ -892,6 +935,7 @@ export default function RaidReplay3D({
           rig.label = labelAsset.sprite
           rig.labelTexture = labelAsset.texture
           rig.labelMaterial = labelAsset.material
+          rig.lastValidPosition = initialAnchorPos.clone()
         })
         setModelReady(true)
         setModelError(null)
@@ -904,12 +948,25 @@ export default function RaidReplay3D({
 
     let raf = 0
     const animate = () => {
-      const {
-        activeFrameIndex: currentActiveFrameIndex,
-        leftFrameIndex: currentLeftFrameIndex,
-        rightFrameIndex: currentRightFrameIndex,
-        scrubMix: currentScrubMix,
-      } = frameInfoRef.current
+      const targetScrub = scrubValueRef.current
+      const prevRenderScrub = renderScrubRef.current
+      const nextRenderScrub =
+        Math.abs(targetScrub - prevRenderScrub) < 0.001
+          ? targetScrub
+          : prevRenderScrub + (targetScrub - prevRenderScrub) * 0.18
+      renderScrubRef.current = nextRenderScrub
+      const currentLeftLogicalIndex = Math.min(
+        Math.floor(nextRenderScrub),
+        Math.max(0, totalFramesRef.current - 1),
+      )
+      const currentRightLogicalIndex = Math.min(
+        currentLeftLogicalIndex + 1,
+        Math.max(0, totalFramesRef.current - 1),
+      )
+      const currentLeftFrameIndex = validFrameIndices[currentLeftLogicalIndex] ?? 0
+      const currentRightFrameIndex = validFrameIndices[currentRightLogicalIndex] ?? currentLeftFrameIndex
+      const currentScrubMix = Math.max(0, Math.min(1, nextRenderScrub - currentLeftLogicalIndex))
+      const currentActiveFrameIndex = validFrameIndices[Math.round(nextRenderScrub)] ?? currentLeftFrameIndex
       const matFrame = matWindow[currentActiveFrameIndex] || {}
       const poseFrame = interpolatePoseFrame(
         Array.isArray(poseWindow) ? poseWindow[currentLeftFrameIndex] || {} : {},
@@ -958,7 +1015,7 @@ export default function RaidReplay3D({
           if (rig.mannequin) {
             rig.mannequin.visible = true
             const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            rig.mannequin.position.copy(fallbackPos)
+            lerpVector3(rig.mannequin.position, fallbackPos, 0.18)
             rig.lastValidPosition = fallbackPos.clone()
             if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
           }
@@ -981,9 +1038,9 @@ export default function RaidReplay3D({
           if (rig.mannequin) {
             rig.mannequin.visible = true
             const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            rig.mannequin.position.copy(fallbackPos)
+            lerpVector3(rig.mannequin.position, fallbackPos, 0.18)
             rig.lastValidPosition = fallbackPos.clone()
-            if (rig.lastValidQuaternion) rig.mannequin.quaternion.copy(rig.lastValidQuaternion)
+            if (rig.lastValidQuaternion) slerpQuaternion(rig.mannequin.quaternion, rig.lastValidQuaternion, 0.16)
             if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
           }
           continue
@@ -1050,7 +1107,7 @@ export default function RaidReplay3D({
           const hip3 = to3(hipMid || midpoint(leftHip, rightHip))
           if (hip3) {
             const desiredPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            rig.mannequin.position.copy(desiredPos)
+            lerpVector3(rig.mannequin.position, desiredPos, 0.18)
             rig.lastValidPosition = desiredPos.clone()
             const shoulderSpan = midpoint(leftShoulder3, rightShoulder3)
             const hipSpan = midpoint(to3(map.get('left_hip')), to3(map.get('right_hip')))
@@ -1061,7 +1118,7 @@ export default function RaidReplay3D({
               if (forward.lengthSq() > 1e-6) {
                 const yaw = Math.atan2(forward.x, forward.z)
                 const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
-                rig.mannequin.quaternion.copy(targetQuat)
+                slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.16)
                 rig.lastValidQuaternion = targetQuat.clone()
               }
             }
@@ -1095,6 +1152,46 @@ export default function RaidReplay3D({
           applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, hip3, rightKnee3, 0.34)
           applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, rightKnee3, rightAnkle3, 0.44)
         }
+      }
+
+      raycaster.setFromCamera(pointerRef.current, camera)
+      const intersections = raycaster
+        .intersectObjects(mannequinGroup.children, true)
+        .find((hit) => Number.isFinite(Number(hit?.object?.userData?.playerId)))
+      const hoveredPid = Number(intersections?.object?.userData?.playerId)
+      if (Number.isFinite(hoveredPid)) {
+        const tracked = matById.get(hoveredPid) || null
+        const posed = poseById.get(hoveredPid) || null
+        const details = {
+          id: hoveredPid,
+          role: hoveredPid === Number(raiderId) ? 'Raider' : 'Player',
+          visible: tracked?.visible ?? null,
+          courtPos: Array.isArray(tracked?.court_pos) ? tracked.court_pos : null,
+          bbox: Array.isArray(tracked?.bbox) ? tracked.bbox : null,
+          keypoints: Array.isArray(posed?.keypoints) ? posed.keypoints.length : 0,
+          x: hoverPointRef.current.x,
+          y: hoverPointRef.current.y,
+        }
+        hoveredDataRef.current = details
+        const signature = JSON.stringify([
+          details.id,
+          currentActiveFrameIndex,
+          details.visible,
+          details.courtPos?.[0],
+          details.courtPos?.[1],
+          details.bbox?.join(','),
+          details.keypoints,
+          details.x,
+          details.y,
+        ])
+        if (signature !== lastHoverSignatureRef.current) {
+          lastHoverSignatureRef.current = signature
+          setHoveredCard(details)
+        }
+      } else if (lastHoverSignatureRef.current) {
+        hoveredDataRef.current = null
+        lastHoverSignatureRef.current = ''
+        setHoveredCard(null)
       }
 
       controls.update()
@@ -1136,9 +1233,33 @@ export default function RaidReplay3D({
         direction,
       })
     }
+    const onMouseMove = (ev) => {
+      const rect = renderer.domElement.getBoundingClientRect()
+      pointerRef.current.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
+      pointerRef.current.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1
+      hoverPointRef.current = {
+        x: ev.clientX - rect.left + 12,
+        y: ev.clientY - rect.top + 12,
+      }
+      if (hoveredDataRef.current) {
+        setHoveredCard({
+          ...hoveredDataRef.current,
+          x: hoverPointRef.current.x,
+          y: hoverPointRef.current.y,
+        })
+      }
+    }
+    const onMouseLeave = () => {
+      pointerRef.current.set(2, 2)
+      hoveredDataRef.current = null
+      lastHoverSignatureRef.current = ''
+      setHoveredCard(null)
+    }
     const ro = new ResizeObserver(resize)
     ro.observe(el)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
+    renderer.domElement.addEventListener('mousemove', onMouseMove)
+    renderer.domElement.addEventListener('mouseleave', onMouseLeave)
     resize()
     raf = requestAnimationFrame(animate)
 
@@ -1147,6 +1268,8 @@ export default function RaidReplay3D({
       if (raf) cancelAnimationFrame(raf)
       try {
         renderer.domElement.removeEventListener('wheel', onWheel)
+        renderer.domElement.removeEventListener('mousemove', onMouseMove)
+        renderer.domElement.removeEventListener('mouseleave', onMouseLeave)
       } catch {
         // ignore
       }
@@ -1305,6 +1428,38 @@ export default function RaidReplay3D({
         <div className="pointer-events-none absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full border border-white/10 bg-black/55 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur">
           Frame {scrollIndicator.frame}
           {scrollIndicator.direction < 0 ? ' | reverse' : scrollIndicator.direction > 0 ? ' | forward' : ''}
+        </div>
+      ) : null}
+      {hoveredCard ? (
+        <div
+          className="pointer-events-none absolute z-30 w-52 rounded-xl border border-white/10 bg-black/75 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur"
+          style={{
+            left: hoveredCard.x,
+            top: hoveredCard.y,
+          }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="font-semibold">{hoveredCard.role}</span>
+            <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-semibold">
+              ID {hoveredCard.id}
+            </span>
+          </div>
+          <div className="mt-2 space-y-1 text-white/85">
+            <div>
+              Court:{' '}
+              {hoveredCard.courtPos
+                ? `${Number(hoveredCard.courtPos[0]).toFixed(2)}, ${Number(hoveredCard.courtPos[1]).toFixed(2)}`
+                : 'n/a'}
+            </div>
+            <div>Visible: {hoveredCard.visible == null ? 'n/a' : hoveredCard.visible ? 'yes' : 'no'}</div>
+            <div>
+              BBox:{' '}
+              {hoveredCard.bbox
+                ? hoveredCard.bbox.map((v) => Math.round(Number(v) || 0)).join(', ')
+                : 'n/a'}
+            </div>
+            <div>Pose keypoints: {hoveredCard.keypoints ?? 0}</div>
+          </div>
         </div>
       ) : null}
 

@@ -775,7 +775,19 @@ function FrameEventsList({ frameIdx, hhi, hli, events }) {
   )
 }
 
-function ScoreStrip({ aName = 'Team A', bName = 'Team B', a = 0, b = 0 }) {
+function ScoreStripInner({
+  aName = 'Team A',
+  bName = 'Team B',
+  a = 0,
+  b = 0,
+  currentRaid = null,
+  raidSummaries = [],
+}) {
+  const [showReview, setShowReview] = useState(false)
+  const items = raidSummaries
+    .slice()
+    .sort((x, y) => Number(x?.raid_index ?? 0) - Number(y?.raid_index ?? 0))
+
   return (
     <div className="rounded-2xl border border-stone-200 bg-white/70 px-4 py-3 shadow-sm backdrop-blur dark:border-stone-800 dark:bg-stone-950/30 dark:shadow-none">
       <div className="flex items-center justify-between gap-3">
@@ -786,19 +798,157 @@ function ScoreStrip({ aName = 'Team A', bName = 'Team B', a = 0, b = 0 }) {
           <div className="mt-0.5 truncate text-sm font-semibold text-stone-900 dark:text-stone-50">
             {aName} <span className="text-stone-300">vs</span> {bName}
           </div>
+          {currentRaid?.raid_label ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-stone-600 dark:text-stone-400">
+              <Badge tone="slate">{currentRaid.raid_label}</Badge>
+              <span>
+                Team {currentRaid.attacking_team ?? '-'} raid
+              </span>
+              {currentRaid.raider_id != null ? (
+                <span>Raider {_fmtPid(currentRaid.raider_id)}</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
-        <div className="flex items-baseline gap-2">
-          <div className="tabular-nums text-3xl font-semibold tracking-tight text-stone-900 dark:text-stone-50">
-            {a}
+        <div className="flex items-center gap-3">
+          <div className="flex items-baseline gap-2">
+            <div className="tabular-nums text-3xl font-semibold tracking-tight text-stone-900 dark:text-stone-50">
+              {a}
+            </div>
+            <div className="text-stone-400">:</div>
+            <div className="tabular-nums text-3xl font-semibold tracking-tight text-stone-900 dark:text-stone-50">
+              {b}
+            </div>
           </div>
-          <div className="text-stone-400">:</div>
-          <div className="tabular-nums text-3xl font-semibold tracking-tight text-stone-900 dark:text-stone-50">
-            {b}
-          </div>
+          <button
+            type="button"
+            onClick={() => setShowReview((v) => !v)}
+            className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
+          >
+            {showReview ? 'Hide Actions' : 'Review Actions'}
+          </button>
         </div>
       </div>
+
+      {showReview ? (
+        <div className="mt-4 max-h-[340px] space-y-3 overflow-auto pr-1">
+          {items.length ? (
+            items.map((raid) => (
+              <div
+                key={`${raid?.raid_label ?? 'raid'}-${raid?.raid_index ?? 0}`}
+                className="rounded-2xl border border-stone-200 bg-white px-3 py-3 dark:border-stone-800 dark:bg-stone-950/30"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone={raid?.status === 'live' ? 'amber' : 'slate'}>
+                      {raid?.raid_label ?? `raid${raid?.raid_index ?? '-'}`}
+                    </Badge>
+                    <span className="text-sm font-semibold text-stone-900 dark:text-stone-50">
+                      Team {raid?.attacking_team ?? '-'} raid
+                    </span>
+                    {raid?.raider_id != null ? (
+                      <span className="text-xs text-stone-600 dark:text-stone-400">
+                        Raider {_fmtPid(raid.raider_id)}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-xs text-stone-600 dark:text-stone-400">
+                    score after: {raid?.team_scores?.A ?? 0} - {raid?.team_scores?.B ?? 0}
+                  </div>
+                </div>
+
+                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                  <div className="rounded-xl bg-stone-50 px-3 py-2 dark:bg-stone-900/40">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">
+                      Score Calculation
+                    </div>
+                    {Array.isArray(raid?.score_breakdown) && raid.score_breakdown.length ? (
+                      <div className="mt-2 space-y-1.5 text-xs text-stone-700 dark:text-stone-200">
+                        {raid.score_breakdown.map((item, idx) => (
+                          <div key={`${idx}-${item?.frame ?? 0}`} className="rounded-lg bg-white px-2 py-2 dark:bg-stone-950/30">
+                            <span className="font-semibold">f{item?.frame ?? '-'}</span>{' '}
+                            <span>Team {item?.team ?? '-'} +{item?.delta ?? 0}</span>{' '}
+                            <span className="text-stone-500 dark:text-stone-400">
+                              ({item?.reason ?? 'score'})
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-xs text-stone-500 dark:text-stone-400">
+                        No score changes recorded for this raid.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl bg-stone-50 px-3 py-2 dark:bg-stone-900/40">
+                    <div className="text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">
+                      Player Actions
+                    </div>
+                    {Array.isArray(raid?.actions) && raid.actions.length ? (
+                      <div className="mt-2 space-y-1.5 text-xs text-stone-700 dark:text-stone-200">
+                        {raid.actions.map((action, idx) => (
+                          <div
+                            key={`${idx}-${action?.frame ?? 0}`}
+                            className={`rounded-lg px-2 py-2 ${
+                              Number(action?.points ?? 0) > 0 || action?.highlight
+                                ? 'border border-emerald-200 bg-emerald-50 dark:border-emerald-900/50 dark:bg-emerald-950/20'
+                                : 'bg-white dark:bg-stone-950/30'
+                            }`}
+                          >
+                            <div className="font-semibold">
+                              f{action?.frame ?? '-'} | {action?.type ?? 'ACTION'}
+                            </div>
+                            <div className="mt-1 text-stone-600 dark:text-stone-400">
+                              {action?.description ?? 'No description'}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-stone-500 dark:text-stone-500">
+                              points {action?.points ?? 0} | conf {Number(action?.confidence ?? 0).toFixed(2)}
+                              {Number(action?.points ?? 0) > 0 || action?.highlight ? (
+                                <Badge tone="emerald">point action</Badge>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-xs text-stone-500 dark:text-stone-400">
+                        No actions recorded yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-3 py-3 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-950/30 dark:text-stone-400">
+              No raid review data yet.
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
+  )
+}
+
+function ScoreStrip({
+  aName = 'Team A',
+  bName = 'Team B',
+  a = 0,
+  b = 0,
+  currentRaid = null,
+  raidSummaries = [],
+}) {
+  return (
+    <ScoreStripInner
+      aName={aName}
+      bName={bName}
+      a={a}
+      b={b}
+      currentRaid={currentRaid}
+      raidSummaries={raidSummaries}
+    />
   )
 }
 
@@ -828,6 +978,7 @@ function App() {
 
   const [conn, setConn] = useState({ mode: 'idle', lastAt: null, error: null })
   const [live, setLive] = useState(null)
+  const [archiveReview, setArchiveReview] = useState(null)
   const [health, setHealth] = useState({
     ok: false,
     live: false,
@@ -870,6 +1021,29 @@ function App() {
     const exact = window.find((s) => Number(s?.frame) === Number(targetFrame))
     return exact || window[Math.floor(window.length / 2)] || null
   }, [selectedDetails, selectedEvent])
+
+  const eventsByRaid = useMemo(() => {
+    const grouped = new Map()
+    for (const ev of Array.isArray(events) ? events : []) {
+      const raidIndex = Number(ev?.raid_index)
+      const raidLabel =
+        ev?.raid_label || (Number.isFinite(raidIndex) && raidIndex > 0 ? `raid${raidIndex}` : 'Unassigned')
+      if (!grouped.has(raidLabel)) {
+        grouped.set(raidLabel, {
+          raidLabel,
+          raidIndex: Number.isFinite(raidIndex) ? raidIndex : Number.MAX_SAFE_INTEGER,
+          items: [],
+        })
+      }
+      grouped.get(raidLabel).items.push(ev)
+    }
+    return Array.from(grouped.values())
+      .sort((a, b) => a.raidIndex - b.raidIndex || a.raidLabel.localeCompare(b.raidLabel))
+      .map((group) => ({
+        ...group,
+        items: group.items.slice().sort((a, b) => Number(b?.frame ?? 0) - Number(a?.frame ?? 0)),
+      }))
+  }, [events])
 
   useEffect(() => {
     if (!showLive) return
@@ -1116,6 +1290,17 @@ function App() {
         if (!res.ok) return
         const payload = await res.json()
         const incoming = Array.isArray(payload?.events) ? payload.events : []
+        setArchiveReview({
+          raidSummaries: Array.isArray(payload?.raid_summaries) ? payload.raid_summaries : [],
+          teamScores: {
+            A: Number(payload?.team_scores?.A ?? 0),
+            B: Number(payload?.team_scores?.B ?? 0),
+          },
+          currentRaid:
+            Array.isArray(payload?.raid_summaries) && payload.raid_summaries.length
+              ? payload.raid_summaries[payload.raid_summaries.length - 1]
+              : null,
+        })
         if (!incoming.length) {
           // Keep whatever we already have, but don't throw.
           return
@@ -1157,14 +1342,19 @@ function App() {
     }
   }, [endpoints, health.ok, showLive])
 
-  const validatedTouchScore = useMemo(() => {
-    let score = 0
+  const validatedTouchSummary = useMemo(() => {
+    let total = 0
+    let teamA = 0
+    let teamB = 0
     for (const ev of events) {
       if (ev?.type === 'CONFIRMED_RAIDER_DEFENDER_CONTACT' && ev?.classifier_label === 'valid') {
-        score += 1
+        total += 1
+        const team = String(ev?.attacking_team || '').toUpperCase()
+        if (team === 'B') teamB += 1
+        else teamA += 1
       }
     }
-    return score
+    return { total, teamA, teamB }
   }, [events])
 
   const connBadge = useMemo(() => {
@@ -1177,20 +1367,18 @@ function App() {
   }, [conn.mode, health.ok, showLive])
 
   const scoreboard = useMemo(() => {
-    const attacker = live?.score_attacker ?? 0
-    const defender = live?.score_defender ?? 0
+    const attacker = live?.score_attacker ?? archiveReview?.teamScores?.A ?? 0
+    const defender = live?.score_defender ?? archiveReview?.teamScores?.B ?? 0
     return { attacker, defender }
-  }, [live])
+  }, [archiveReview, live])
 
   const displayedScoreboard = useMemo(() => {
-    // For now, treat each classifier-validated touch as +1 to Team A.
-    // If the backend connection drops, we reset scores (avoid stale UI).
     if (!health.ok) return { attacker: 0, defender: 0 }
     return {
-      attacker: (scoreboard.attacker ?? 0) + (validatedTouchScore ?? 0),
+      attacker: scoreboard.attacker ?? 0,
       defender: scoreboard.defender ?? 0,
     }
-  }, [health.ok, scoreboard.attacker, scoreboard.defender, validatedTouchScore])
+  }, [health.ok, scoreboard.attacker, scoreboard.defender])
 
   useEffect(() => {
     if (!showDashboard) setSelectedEventId(null)
@@ -1201,6 +1389,7 @@ function App() {
     if (health.ok && !wasOnlineRef.current) {
       wasOnlineRef.current = true
       setLatestVideos({ processed: null, report: null })
+      setArchiveReview(null)
       eventMapRef.current = new Map()
       setEvents([])
       setSelectedEventId(null)
@@ -1212,6 +1401,7 @@ function App() {
       wasOnlineRef.current = false
       // Connection is down: clear live/derived state so we don't display stale scores/events.
       setLive(null)
+      setArchiveReview(null)
       eventMapRef.current = new Map()
       setEvents([])
       setSelectedEventId(null)
@@ -1226,6 +1416,7 @@ function App() {
     const prevRun = lastRunIdRef.current
     if (nextRun && prevRun && nextRun !== prevRun) {
       setLatestVideos({ processed: null, report: null })
+      setArchiveReview(null)
       eventMapRef.current = new Map()
       setEvents([])
       setSelectedEventId(null)
@@ -1267,7 +1458,7 @@ function App() {
                   <span className="text-stone-500 dark:text-stone-400">
                     Validated touches:
                   </span>{' '}
-                  <span className="font-semibold tabular-nums">{validatedTouchScore}</span>
+                  <span className="font-semibold tabular-nums">{validatedTouchSummary.total}</span>
                   
                 </div>
                 <div className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs dark:border-stone-800 dark:bg-stone-900/60">
@@ -1349,7 +1540,7 @@ function App() {
           <div className="lg:col-span-8">
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
               <Panel
-                title="Input Video (Backend)"
+                title={`Input Video (Backend)${live?.raid_label ? ` · ${live.raid_label}` : ''}`}
                 right={<Badge tone="slate">MJPEG</Badge>}
               >
                 <StreamView
@@ -1360,7 +1551,7 @@ function App() {
               </Panel>
 
               <Panel
-                title="Processed / Tracked Video"
+                title={`Processed / Tracked Video${live?.raid_label ? ` · ${live.raid_label}` : ''}`}
                 right={<Badge tone="slate">MJPEG</Badge>}
               >
                 <StreamView
@@ -1377,6 +1568,8 @@ function App() {
                 bName="Team B"
                 a={displayedScoreboard.attacker}
                 b={displayedScoreboard.defender}
+                currentRaid={live?.current_raid ?? archiveReview?.currentRaid ?? null}
+                raidSummaries={live?.raid_summaries ?? archiveReview?.raidSummaries ?? []}
               />
             </div>
           </div>
@@ -1472,79 +1665,94 @@ function App() {
             right={<Badge tone="slate">{events.length}</Badge>}
           >
             <div className="max-h-[420px] space-y-2 overflow-auto pr-1">
-              {events.length ? (
-                events
-                  .slice()
-                  .reverse()
-                  .map((ev) => {
-                    const isContact = ev?.type === 'CONFIRMED_RAIDER_DEFENDER_CONTACT'
-                    const label = ev?.classifier_label
-                    const tone =
-                      label === 'valid'
-                        ? 'emerald'
-                        : label === 'invalid'
-                          ? 'rose'
-                          : label
-                            ? 'amber'
-                            : 'slate'
-                    return (
-                      <button
-                        key={ev.id}
-                        className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-left hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-950/20 dark:hover:bg-stone-900/40"
-                        onClick={() => setSelectedEventId(ev.id)}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-semibold text-stone-900 dark:text-stone-50">
-                              {formatEventType(ev.type)}
-                            </div>
-                            <div className="mt-0.5 text-[11px] text-stone-600 dark:text-stone-400">
-                              <span className="tabular-nums">
-                                f{ev.frame ?? '-'}
-                              </span>
-                              <span className="text-stone-300"> · </span>
-                              <span className="tabular-nums">
-                                conf {ev.conf ?? '-'}
-                              </span>
-                              <span className="text-stone-300"> · </span>
-                              <span className="tabular-nums">
-                                factor {ev.factor_conf ?? '-'}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="shrink-0">
-                            {ev.requires_visual_confirmation ? (
-                              <Badge tone="amber">needs check</Badge>
-                            ) : (
-                              <Badge tone="slate">auto</Badge>
-                            )}
-                          </div>
+              {eventsByRaid.length ? (
+                eventsByRaid.map((group) => (
+                  <div
+                    key={group.raidLabel}
+                    className="rounded-2xl border border-stone-200 bg-stone-50/70 p-2 dark:border-stone-800 dark:bg-stone-950/20"
+                  >
+                    <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                      <div className="flex items-center gap-2">
+                        <Badge tone="slate">{group.raidLabel}</Badge>
+                        <div className="text-xs font-medium text-stone-600 dark:text-stone-400">
+                          {group.items.length} event{group.items.length === 1 ? '' : 's'}
                         </div>
+                      </div>
+                    </div>
 
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <Badge tone="slate">
-                            s/o {ev.subject ?? '-'} / {ev.object ?? '-'}
-                          </Badge>
-                          {label ? (
-                            <Badge tone={tone}>
-                              classifier: {label}
-                              {typeof ev.classifier_valid_prob === 'number'
-                                ? ` (${ev.classifier_valid_prob})`
-                                : ''}
-                            </Badge>
-                          ) : (
-                            <Badge tone="slate">classifier: pending</Badge>
-                          )}
-                          {ev.guaranteed_by_classifier ? (
-                            <Badge tone="emerald">guaranteed</Badge>
-                          ) : null}
-                          {isContact && label === 'valid' ? (
-                            <Badge tone="emerald">+1</Badge>
-                          ) : null}
-                        </div>
-                      </button>
-                    )
-                  })
+                    <div className="space-y-2">
+                      {group.items.map((ev) => {
+                        const isContact = ev?.type === 'CONFIRMED_RAIDER_DEFENDER_CONTACT'
+                        const label = ev?.classifier_label
+                        const tone =
+                          label === 'valid'
+                            ? 'emerald'
+                            : label === 'invalid'
+                              ? 'rose'
+                              : label
+                                ? 'amber'
+                                : 'slate'
+                        return (
+                          <button
+                            key={ev.id}
+                            className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-left hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-950/20 dark:hover:bg-stone-900/40"
+                            onClick={() => setSelectedEventId(ev.id)}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-stone-900 dark:text-stone-50">
+                                  {formatEventType(ev.type)}
+                                </div>
+                                <div className="mt-0.5 text-[11px] text-stone-600 dark:text-stone-400">
+                                  <span className="tabular-nums">
+                                    f{ev.frame ?? '-'}
+                                  </span>
+                                  <span className="text-stone-300"> | </span>
+                                  <span className="tabular-nums">
+                                    conf {ev.conf ?? '-'}
+                                  </span>
+                                  <span className="text-stone-300"> | </span>
+                                  <span className="tabular-nums">
+                                    factor {ev.factor_conf ?? '-'}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="shrink-0">
+                                {ev.requires_visual_confirmation ? (
+                                  <Badge tone="amber">needs check</Badge>
+                                ) : (
+                                  <Badge tone="slate">auto</Badge>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              <Badge tone="slate">
+                                s/o {ev.subject ?? '-'} / {ev.object ?? '-'}
+                              </Badge>
+                              {label ? (
+                                <Badge tone={tone}>
+                                  classifier: {label}
+                                  {typeof ev.classifier_valid_prob === 'number'
+                                    ? ` (${ev.classifier_valid_prob})`
+                                    : ''}
+                                </Badge>
+                              ) : (
+                                <Badge tone="slate">classifier: pending</Badge>
+                              )}
+                              {ev.guaranteed_by_classifier ? (
+                                <Badge tone="emerald">guaranteed</Badge>
+                              ) : null}
+                              {isContact && label === 'valid' ? (
+                                <Badge tone="emerald">+1</Badge>
+                              ) : null}
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))
               ) : (
                 <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-3 py-3 text-xs text-stone-600">
                   Waiting for confirmed events. Start the backend processing loop
@@ -1774,3 +1982,4 @@ function App() {
 }
 
 export default App
+

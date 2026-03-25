@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js'
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js'
 
 const DEFAULT_KEYPOINT_NAMES = [
   'nose',
@@ -49,8 +50,17 @@ const MANNEQUIN_Y_OFFSET = 0.04
 const MANNEQUIN_ASSET_PATH = '/man2.glb'
 const MANNEQUIN_ASSET_LABEL = 'man2.glb'
 const RAID_REPLAY_CAMERA_LOCK_KEY = 'kabaddi-raid-replay-camera-lock-v1'
+const ANIMATION_ASSET_PATHS = {
+  idle: '/Idle.fbx',
+  crouchedWalking: '/Crouched Walking.fbx',
+  runForward: '/Run Forward.fbx',
+  runningBackward: '/Running Backward.fbx',
+  changeDirection: '/Change Direction.fbx',
+  crouchToStand: '/Crouch To Stand.fbx',
+}
 
 let mannequinAssetPromise = null
+let animationAssetsPromise = null
 let mannequinBoneDebugPrinted = false
 
 function loadMannequinAsset() {
@@ -68,12 +78,72 @@ function loadMannequinAsset() {
   return mannequinAssetPromise
 }
 
+function loadAnimationAssets() {
+  if (!animationAssetsPromise) {
+    animationAssetsPromise = new Promise((resolve, reject) => {
+      const loader = new FBXLoader()
+      const entries = Object.entries(ANIMATION_ASSET_PATHS)
+      Promise.all(
+        entries.map(
+          ([key, path]) =>
+            new Promise((res, rej) => {
+              loader.load(
+                path,
+                (fbx) => {
+                  const clip = Array.isArray(fbx.animations) ? fbx.animations[0] : null
+                  if (!clip) {
+                    rej(new Error(`No animation clip found in ${path}`))
+                    return
+                  }
+                  clip.name = key
+                  res([key, { root: fbx, clip }])
+                },
+                undefined,
+                (err) => rej(err),
+              )
+            }),
+        ),
+      )
+        .then((loaded) => resolve(new Map(loaded)))
+        .catch(reject)
+    })
+  }
+  return animationAssetsPromise
+}
+
 function listBoneNames(root) {
   const names = []
   root.traverse((obj) => {
     if (obj?.isBone) names.push(String(obj.name || ''))
   })
   return names
+}
+
+function buildRetargetNameMap(boneMap) {
+  const map = {}
+  const assign = (targetBone, sourceName) => {
+    if (targetBone?.name) map[targetBone.name] = sourceName
+  }
+  assign(boneMap?.hips, 'mixamorigHips')
+  assign(boneMap?.spine, 'mixamorigSpine')
+  assign(boneMap?.chest, 'mixamorigSpine2')
+  assign(boneMap?.neck, 'mixamorigNeck')
+  assign(boneMap?.head, 'mixamorigHead')
+  assign(boneMap?.leftShoulder, 'mixamorigLeftShoulder')
+  assign(boneMap?.leftUpperArm, 'mixamorigLeftArm')
+  assign(boneMap?.leftLowerArm, 'mixamorigLeftForeArm')
+  assign(boneMap?.leftHand, 'mixamorigLeftHand')
+  assign(boneMap?.rightShoulder, 'mixamorigRightShoulder')
+  assign(boneMap?.rightUpperArm, 'mixamorigRightArm')
+  assign(boneMap?.rightLowerArm, 'mixamorigRightForeArm')
+  assign(boneMap?.rightHand, 'mixamorigRightHand')
+  assign(boneMap?.leftUpperLeg, 'mixamorigLeftUpLeg')
+  assign(boneMap?.leftLowerLeg, 'mixamorigLeftLeg')
+  assign(boneMap?.leftFoot, 'mixamorigLeftFoot')
+  assign(boneMap?.rightUpperLeg, 'mixamorigRightUpLeg')
+  assign(boneMap?.rightLowerLeg, 'mixamorigRightLeg')
+  assign(boneMap?.rightFoot, 'mixamorigRightFoot')
+  return map
 }
 
 function _asNum(v, fb = null) {
@@ -429,6 +499,293 @@ function interpolatePoseFrame(aFrame, bFrame, t, participants, keypointNames) {
   }
 }
 
+function buildProceduralKabaddiTargets({
+  root,
+  nextRoot,
+  raiderRoot,
+  isRaider,
+  phase,
+}) {
+  const up = new THREE.Vector3(0, 1, 0)
+  const move = nextRoot
+    ? new THREE.Vector3().subVectors(nextRoot, root)
+    : new THREE.Vector3(0, 0, 0)
+  move.y = 0
+
+  const forward = move.clone()
+  if (forward.lengthSq() < 1e-5) {
+    if (!isRaider && raiderRoot) {
+      forward.copy(new THREE.Vector3().subVectors(raiderRoot, root))
+      forward.y = 0
+    }
+  }
+  if (forward.lengthSq() < 1e-5) forward.set(0, 0, 1)
+  forward.normalize()
+
+  const right = new THREE.Vector3().crossVectors(up, forward).normalize()
+  const speed = _clamp(move.length() / 0.22, 0, 1.15)
+  const distToRaider = !isRaider && raiderRoot ? raiderRoot.distanceTo(root) : 99
+  const engaged = distToRaider < 1.35
+  const wave = phase * Math.PI * 2
+  const strideWave = Math.sin(wave)
+  const counterWave = Math.sin(wave + Math.PI)
+  const crouch = isRaider ? 0.22 : engaged ? 0.2 : 0.14
+  const lean = isRaider ? 0.16 + speed * 0.12 : engaged ? 0.08 : 0.05
+  const bob = Math.sin(wave * 2) * (0.02 + speed * 0.025)
+  const stride = 0.08 + speed * 0.16
+  const armSwing = 0.05 + speed * 0.11
+
+  const hip = root.clone().addScaledVector(up, 0.86 - crouch * 0.18 + bob)
+  const chest = hip.clone().addScaledVector(up, 0.4).addScaledVector(forward, lean)
+  const head = chest.clone().addScaledVector(up, 0.34).addScaledVector(forward, 0.04)
+
+  const leftHip = hip.clone().addScaledVector(right, -0.12)
+  const rightHip = hip.clone().addScaledVector(right, 0.12)
+  const leftShoulder = chest.clone().addScaledVector(right, -0.22).addScaledVector(up, 0.07)
+  const rightShoulder = chest.clone().addScaledVector(right, 0.22).addScaledVector(up, 0.07)
+
+  const leftKnee = leftHip
+    .clone()
+    .addScaledVector(forward, stride * strideWave * 0.65)
+    .addScaledVector(up, -0.34 + Math.max(0, strideWave) * 0.09)
+  const rightKnee = rightHip
+    .clone()
+    .addScaledVector(forward, stride * counterWave * 0.65)
+    .addScaledVector(up, -0.34 + Math.max(0, counterWave) * 0.09)
+  const leftAnkle = leftHip
+    .clone()
+    .addScaledVector(forward, stride * strideWave)
+    .addScaledVector(up, -0.78 + Math.max(0, strideWave) * 0.05)
+  const rightAnkle = rightHip
+    .clone()
+    .addScaledVector(forward, stride * counterWave)
+    .addScaledVector(up, -0.78 + Math.max(0, counterWave) * 0.05)
+
+  const armReach = isRaider ? 0.34 : engaged ? 0.4 : 0.22
+  const guardLift = isRaider ? 0.08 : engaged ? 0.12 : 0.02
+  const leftElbow = leftShoulder
+    .clone()
+    .addScaledVector(forward, armReach * 0.58 + armSwing * counterWave)
+    .addScaledVector(up, -0.08 + guardLift)
+  const rightElbow = rightShoulder
+    .clone()
+    .addScaledVector(forward, armReach * 0.58 + armSwing * strideWave)
+    .addScaledVector(up, -0.08 + guardLift)
+  const leftWrist = leftShoulder
+    .clone()
+    .addScaledVector(forward, armReach + armSwing * counterWave * 1.2)
+    .addScaledVector(up, -0.16 + guardLift)
+  const rightWrist = rightShoulder
+    .clone()
+    .addScaledVector(forward, armReach + armSwing * strideWave * 1.2)
+    .addScaledVector(up, -0.16 + guardLift)
+
+  if (!isRaider && engaged && raiderRoot) {
+    const reachTarget = raiderRoot.clone().addScaledVector(up, 1.05)
+    const sideDot = new THREE.Vector3().subVectors(reachTarget, root).dot(right)
+    if (sideDot >= 0) {
+      rightElbow.lerp(reachTarget, 0.42)
+      rightWrist.lerp(reachTarget, 0.68)
+    } else {
+      leftElbow.lerp(reachTarget, 0.42)
+      leftWrist.lerp(reachTarget, 0.68)
+    }
+  }
+
+  return {
+    forward,
+    hip,
+    chest,
+    head,
+    leftShoulder,
+    rightShoulder,
+    leftElbow,
+    rightElbow,
+    leftWrist,
+    rightWrist,
+    leftHip,
+    rightHip,
+    leftKnee,
+    rightKnee,
+    leftAnkle,
+    rightAnkle,
+  }
+}
+
+function findPlayerWindowEndpoints(matWindow, pid) {
+  let first = null
+  let last = null
+  for (const frame of Array.isArray(matWindow) ? matWindow : []) {
+    const players = Array.isArray(frame?.players) ? frame.players : []
+    const player = players.find((entry) => Number(entry?.id) === Number(pid) && hasValidCourtPos(entry))
+    if (!player) continue
+    if (!first) first = player.court_pos
+    last = player.court_pos
+  }
+  return { first, last }
+}
+
+function chooseKabaddiPreset({ isRaider, index, startCourt, endCourt }) {
+  const dx = Math.abs((_asNum(endCourt?.[0], 0) || 0) - (_asNum(startCourt?.[0], 0) || 0))
+  const dy = Math.abs((_asNum(endCourt?.[1], 0) || 0) - (_asNum(startCourt?.[1], 0) || 0))
+  const distance = Math.hypot(dx, dy)
+  if (isRaider) return distance > 1.25 ? 'raider_burst' : 'raider_probe'
+  return index % 2 === 0 ? 'defender_guard' : 'defender_lunge'
+}
+
+function buildPresetKabaddiTargets({
+  root,
+  startRoot,
+  endRoot,
+  raiderRoot,
+  isRaider,
+  preset,
+  progress,
+  actorIndex,
+}) {
+  const up = new THREE.Vector3(0, 1, 0)
+  const path = endRoot
+    ? new THREE.Vector3().subVectors(endRoot, startRoot || root)
+    : new THREE.Vector3(0, 0, 0)
+  path.y = 0
+  let forward = path.clone()
+  if (forward.lengthSq() < 1e-6 && !isRaider && raiderRoot) {
+    forward.copy(new THREE.Vector3().subVectors(raiderRoot, root))
+    forward.y = 0
+  }
+  if (forward.lengthSq() < 1e-6) forward.set(0, 0, 1)
+  forward.normalize()
+  const right = new THREE.Vector3().crossVectors(up, forward).normalize()
+  const phase = progress * Math.PI * (isRaider ? 3.6 : 2.8) + actorIndex * 0.9
+  const wave = Math.sin(phase)
+  const anti = Math.sin(phase + Math.PI)
+  const pulse = Math.sin(progress * Math.PI)
+  const towardRaider = !isRaider && raiderRoot
+    ? new THREE.Vector3().subVectors(raiderRoot, root).setY(0)
+    : null
+  if (towardRaider && towardRaider.lengthSq() > 1e-6) towardRaider.normalize()
+
+  let crouch = 0.14
+  let lean = 0.06
+  let stride = 0.1
+  let armReach = 0.24
+  let guardHeight = 0.05
+  let shoulderBias = 0
+
+  switch (preset) {
+    case 'raider_probe':
+      crouch = 0.2
+      lean = 0.12 + pulse * 0.05
+      stride = 0.12
+      armReach = 0.28
+      guardHeight = 0.08
+      shoulderBias = 0.03
+      break
+    case 'raider_burst':
+      crouch = 0.18
+      lean = 0.18 + pulse * 0.08
+      stride = 0.18
+      armReach = 0.25
+      guardHeight = 0.03
+      shoulderBias = -0.02
+      break
+    case 'defender_lunge':
+      crouch = 0.22
+      lean = 0.1 + pulse * 0.04
+      stride = 0.09
+      armReach = 0.38
+      guardHeight = 0.12
+      shoulderBias = 0.06
+      break
+    case 'defender_guard':
+    default:
+      crouch = 0.16
+      lean = 0.05
+      stride = 0.07
+      armReach = 0.22
+      guardHeight = 0.11
+      shoulderBias = 0.02
+      break
+  }
+
+  const bob = Math.sin(phase * 2) * 0.018
+  const hip = root.clone().addScaledVector(up, 0.84 - crouch * 0.2 + bob)
+  const chest = hip.clone().addScaledVector(up, 0.39).addScaledVector(forward, lean)
+  const head = chest.clone().addScaledVector(up, 0.34).addScaledVector(forward, 0.03)
+
+  const leftHip = hip.clone().addScaledVector(right, -0.12)
+  const rightHip = hip.clone().addScaledVector(right, 0.12)
+  const leftShoulder = chest.clone().addScaledVector(right, -0.22).addScaledVector(up, 0.07 + shoulderBias)
+  const rightShoulder = chest.clone().addScaledVector(right, 0.22).addScaledVector(up, 0.07 - shoulderBias)
+
+  const leftKnee = leftHip.clone().addScaledVector(forward, stride * wave * 0.58).addScaledVector(up, -0.33 + Math.max(0, wave) * 0.08)
+  const rightKnee = rightHip.clone().addScaledVector(forward, stride * anti * 0.58).addScaledVector(up, -0.33 + Math.max(0, anti) * 0.08)
+  const leftAnkle = leftHip.clone().addScaledVector(forward, stride * wave).addScaledVector(up, -0.77 + Math.max(0, wave) * 0.04)
+  const rightAnkle = rightHip.clone().addScaledVector(forward, stride * anti).addScaledVector(up, -0.77 + Math.max(0, anti) * 0.04)
+
+  const leftElbow = leftShoulder.clone().addScaledVector(forward, armReach * 0.6 + anti * 0.05).addScaledVector(up, -0.08 + guardHeight)
+  const rightElbow = rightShoulder.clone().addScaledVector(forward, armReach * 0.6 + wave * 0.05).addScaledVector(up, -0.08 + guardHeight)
+  const leftWrist = leftShoulder.clone().addScaledVector(forward, armReach + anti * 0.08).addScaledVector(up, -0.16 + guardHeight)
+  const rightWrist = rightShoulder.clone().addScaledVector(forward, armReach + wave * 0.08).addScaledVector(up, -0.16 + guardHeight)
+
+  if (!isRaider && towardRaider && preset === 'defender_lunge') {
+    const tackleTarget = raiderRoot.clone().addScaledVector(up, 0.92)
+    const sideDot = towardRaider.dot(right)
+    if (sideDot >= 0) {
+      rightElbow.lerp(tackleTarget, 0.46)
+      rightWrist.lerp(tackleTarget, 0.7)
+    } else {
+      leftElbow.lerp(tackleTarget, 0.46)
+      leftWrist.lerp(tackleTarget, 0.7)
+    }
+  }
+
+  return {
+    forward,
+    hip,
+    chest,
+    head,
+    leftShoulder,
+    rightShoulder,
+    leftElbow,
+    rightElbow,
+    leftWrist,
+    rightWrist,
+    leftHip,
+    rightHip,
+    leftKnee,
+    rightKnee,
+    leftAnkle,
+    rightAnkle,
+  }
+}
+
+function chooseAnimationState({
+  isRaider,
+  progress,
+  movement,
+  moveDir,
+  previousMoveDir,
+  distToRaider,
+}) {
+  const speed = movement?.length?.() || 0
+  const turning =
+    previousMoveDir && moveDir && previousMoveDir.lengthSq() > 1e-6 && moveDir.lengthSq() > 1e-6
+      ? previousMoveDir.angleTo(moveDir)
+      : 0
+
+  if (turning > 0.55) return 'changeDirection'
+  if (progress < 0.12 && speed < 0.08) return 'crouchToStand'
+  if (speed < 0.045) return 'idle'
+  if (isRaider) {
+    if (speed > 0.13) return 'runForward'
+    return 'crouchedWalking'
+  }
+  if (Number.isFinite(distToRaider) && distToRaider < 1.15 && speed < 0.11) return 'runningBackward'
+  if (speed > 0.14) return 'runForward'
+  return 'crouchedWalking'
+}
+
 export default function RaidReplay3D({
   matWindow,
   poseWindow,
@@ -498,20 +855,26 @@ export default function RaidReplay3D({
     return _asInt(mid?.raider_id)
   }, [matWindow])
   const validFrameIndices = useMemo(() => {
-    if (!Array.isArray(matWindow) || matWindow.length === 0) return []
-    if (!Array.isArray(participants) || participants.length === 0) {
-      return matWindow.map((_, idx) => idx)
+    return Array.isArray(matWindow) ? matWindow.map((_, idx) => idx) : []
+  }, [matWindow])
+  const playerMotionPlan = useMemo(() => {
+    const entries = new Map()
+    for (let i = 0; i < participants.length; i++) {
+      const pid = Number(participants[i])
+      const { first, last } = findPlayerWindowEndpoints(matWindow, pid)
+      entries.set(pid, {
+        startCourt: first,
+        endCourt: last || first,
+        preset: chooseKabaddiPreset({
+          isRaider: pid === Number(raiderId),
+          index: i,
+          startCourt: first,
+          endCourt: last || first,
+        }),
+      })
     }
-    const out = []
-    for (let i = 0; i < matWindow.length; i++) {
-      const players = Array.isArray(matWindow[i]?.players) ? matWindow[i].players : []
-      const ok = participants.every((pid) =>
-        players.some((player) => Number(player?.id) === Number(pid) && hasValidCourtPos(player)),
-      )
-      if (ok) out.push(i)
-    }
-    return out
-  }, [matWindow, participants])
+    return entries
+  }, [matWindow, participants, raiderId])
   const totalFrames = useMemo(
     () => validFrameIndices.length,
     [validFrameIndices],
@@ -859,12 +1222,18 @@ export default function RaidReplay3D({
         labelMaterial: null,
         lastValidPosition: null,
         lastValidQuaternion: null,
+        lastMoveDir: null,
+        mixer: null,
+        animationActions: null,
+        activeActionKey: null,
+        activeAction: null,
       })
     }
 
     let alive = true
-    loadMannequinAsset()
-      .then((gltf) => {
+    const clock = new THREE.Clock()
+    Promise.all([loadMannequinAsset(), loadAnimationAssets().catch(() => null)])
+      .then(([gltf, animationAssets]) => {
         if (!alive) return
         if (!mannequinBoneDebugPrinted) {
           const boneNames = listBoneNames(gltf.scene)
@@ -881,7 +1250,7 @@ export default function RaidReplay3D({
         participants.forEach((pid, idx) => {
           const rig = rigs.get(Number(pid))
           if (!rig || rig.mannequin) return
-          const root = skeletonClone(gltf.scene)
+          const root = SkeletonUtils.clone(gltf.scene)
           const color = rigColor(idx, pid)
           tintModel(root, color, isDark)
           normalizeModelPlacement(root)
@@ -936,6 +1305,39 @@ export default function RaidReplay3D({
           rig.labelTexture = labelAsset.texture
           rig.labelMaterial = labelAsset.material
           rig.lastValidPosition = initialAnchorPos.clone()
+          rig.mixer = new THREE.AnimationMixer(root)
+          rig.animationActions = new Map()
+          if (animationAssets?.size) {
+            const targetHelper = new THREE.SkeletonHelper(root)
+            const nameMap = buildRetargetNameMap(boneMap)
+            for (const [clipKey, clipAsset] of animationAssets.entries()) {
+              try {
+                const retargetedClip = SkeletonUtils.retargetClip(
+                  targetHelper,
+                  clipAsset.root,
+                  clipAsset.clip,
+                  {
+                    names: nameMap,
+                    preservePosition: false,
+                    preserveHipPosition: false,
+                    useFirstFramePosition: false,
+                    hip: 'mixamorigHips',
+                  },
+                )
+                if (!retargetedClip) continue
+                const action = rig.mixer.clipAction(retargetedClip)
+                action.enabled = true
+                action.setLoop(THREE.LoopRepeat, Infinity)
+                action.clampWhenFinished = false
+                action.timeScale = 1
+                action.setEffectiveWeight(0)
+                action.play()
+                rig.animationActions.set(clipKey, action)
+              } catch {
+                // ignore a clip that cannot be retargeted to this mannequin
+              }
+            }
+          }
         })
         setModelReady(true)
         setModelError(null)
@@ -948,6 +1350,7 @@ export default function RaidReplay3D({
 
     let raf = 0
     const animate = () => {
+      const deltaSeconds = Math.min(0.05, clock.getDelta())
       const targetScrub = scrubValueRef.current
       const prevRenderScrub = renderScrubRef.current
       const nextRenderScrub =
@@ -968,6 +1371,7 @@ export default function RaidReplay3D({
       const currentScrubMix = Math.max(0, Math.min(1, nextRenderScrub - currentLeftLogicalIndex))
       const currentActiveFrameIndex = validFrameIndices[Math.round(nextRenderScrub)] ?? currentLeftFrameIndex
       const matFrame = matWindow[currentActiveFrameIndex] || {}
+      const sceneProgress = matWindow.length > 1 ? currentActiveFrameIndex / (matWindow.length - 1) : 0
       const poseFrame = interpolatePoseFrame(
         Array.isArray(poseWindow) ? poseWindow[currentLeftFrameIndex] || {} : {},
         Array.isArray(poseWindow) ? poseWindow[currentRightFrameIndex] || {} : {},
@@ -979,6 +1383,23 @@ export default function RaidReplay3D({
       const poseById = new Map(posePlayers.map((player) => [Number(player?.id), player]))
       const matPlayers = Array.isArray(matFrame.players) ? matFrame.players : []
       const matById = new Map(matPlayers.map((player) => [Number(player?.id), player]))
+      const leftMatPlayers = Array.isArray(matWindow[currentLeftFrameIndex]?.players)
+        ? matWindow[currentLeftFrameIndex].players
+        : []
+      const rightMatPlayers = Array.isArray(matWindow[currentRightFrameIndex]?.players)
+        ? matWindow[currentRightFrameIndex].players
+        : []
+      const leftMatById = new Map(leftMatPlayers.map((player) => [Number(player?.id), player]))
+      const rightMatById = new Map(rightMatPlayers.map((player) => [Number(player?.id), player]))
+      const raiderPlan = raiderId != null ? playerMotionPlan.get(Number(raiderId)) : null
+      const raiderLeft = raiderId != null ? leftMatById.get(Number(raiderId)) : null
+      const raiderRight = raiderId != null ? rightMatById.get(Number(raiderId)) : null
+      const raiderCourt = interpolateCourtPos(
+        raiderPlan?.startCourt || raiderLeft?.court_pos,
+        raiderPlan?.endCourt || raiderRight?.court_pos || raiderLeft?.court_pos,
+        sceneProgress,
+      )
+      const raiderRoot = posFromCourt(raiderCourt)
 
       for (const pid of participants) {
         const rig = rigs.get(Number(pid))
@@ -986,7 +1407,21 @@ export default function RaidReplay3D({
 
         const posePlayer = poseById.get(Number(pid))
         const tracked = matById.get(Number(pid))
-        const root = posFromCourt(posePlayer?.court_pos || tracked?.court_pos)
+        const trackedLeft = leftMatById.get(Number(pid))
+        const trackedRight = rightMatById.get(Number(pid))
+        const motionPlan = playerMotionPlan.get(Number(pid))
+        const currentCourt = interpolateCourtPos(
+          motionPlan?.startCourt || trackedLeft?.court_pos || tracked?.court_pos,
+          motionPlan?.endCourt || trackedRight?.court_pos || tracked?.court_pos,
+          sceneProgress,
+        )
+        const nextCourt = interpolateCourtPos(
+          motionPlan?.startCourt || trackedLeft?.court_pos || tracked?.court_pos,
+          motionPlan?.endCourt || trackedRight?.court_pos || tracked?.court_pos,
+          Math.min(1, sceneProgress + 1 / Math.max(2, matWindow.length - 1)),
+        )
+        const root = posFromCourt(currentCourt)
+        const nextRoot = posFromCourt(nextCourt)
         const positions = rig.lineGeometry.attributes.position.array
 
         if (!root) {
@@ -1007,22 +1442,7 @@ export default function RaidReplay3D({
           continue
         }
 
-        if (!posePlayer) {
-          rig.lineSegments.visible = false
-          rig.joints.forEach((joint) => {
-            joint.visible = false
-          })
-          if (rig.mannequin) {
-            rig.mannequin.visible = true
-            const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            lerpVector3(rig.mannequin.position, fallbackPos, 0.18)
-            rig.lastValidPosition = fallbackPos.clone()
-            if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
-          }
-          continue
-        }
-
-        const map = keypointMap(posePlayer, keypointNames)
+        const map = posePlayer ? keypointMap(posePlayer, keypointNames) : new Map()
         const leftAnkle = map.get('left_ankle')
         const rightAnkle = map.get('right_ankle')
         const leftHip = map.get('left_hip')
@@ -1030,25 +1450,9 @@ export default function RaidReplay3D({
         const ankleMid = midpoint(leftAnkle, rightAnkle)
         const hipMid = midpoint(leftHip, rightHip)
         const anchor = ankleMid || hipMid
-        if (!anchor) {
-          rig.lineSegments.visible = false
-          rig.joints.forEach((joint) => {
-            joint.visible = false
-          })
-          if (rig.mannequin) {
-            rig.mannequin.visible = true
-            const fallbackPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            lerpVector3(rig.mannequin.position, fallbackPos, 0.18)
-            rig.lastValidPosition = fallbackPos.clone()
-            if (rig.lastValidQuaternion) slerpQuaternion(rig.mannequin.quaternion, rig.lastValidQuaternion, 0.16)
-            if (rig.label) rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.28, 0)
-          }
-          continue
-        }
-
-        const scale = estimateScaleMeters(map)
+        const scale = anchor ? estimateScaleMeters(map) : 0
         const to3 = (kp) => {
-          if (!kp) return null
+          if (!kp || !anchor || !scale) return null
           const dx = (kp.x - anchor.x) * scale * 0.78
           const dy = (anchor.y - kp.y) * scale
           const dz = (kp.x - anchor.x) * scale * 0.14
@@ -1057,17 +1461,19 @@ export default function RaidReplay3D({
 
         let visibleEdges = 0
         let cursor = 0
-        for (const [aIdx, bIdx] of skeletonEdges) {
-          const a = to3(map.get(keypointNames[aIdx]))
-          const b = to3(map.get(keypointNames[bIdx]))
-          if (a && b) {
-            positions[cursor++] = a.x
-            positions[cursor++] = a.y
-            positions[cursor++] = a.z
-            positions[cursor++] = b.x
-            positions[cursor++] = b.y
-            positions[cursor++] = b.z
-            visibleEdges += 1
+        if (anchor) {
+          for (const [aIdx, bIdx] of skeletonEdges) {
+            const a = to3(map.get(keypointNames[aIdx]))
+            const b = to3(map.get(keypointNames[bIdx]))
+            if (a && b) {
+              positions[cursor++] = a.x
+              positions[cursor++] = a.y
+              positions[cursor++] = a.z
+              positions[cursor++] = b.x
+              positions[cursor++] = b.y
+              positions[cursor++] = b.z
+              visibleEdges += 1
+            }
           }
         }
         rig.lineGeometry.setDrawRange(0, visibleEdges * 2)
@@ -1094,63 +1500,84 @@ export default function RaidReplay3D({
         if (rig.mannequin && rig.boneMap) {
           rig.mannequin.visible = true
           restoreBoneRestPose(rig.boneMap, rig.restPose)
-          const leftShoulder3 = to3(map.get('left_shoulder'))
-          const rightShoulder3 = to3(map.get('right_shoulder'))
-          const leftElbow3 = to3(map.get('left_elbow'))
-          const rightElbow3 = to3(map.get('right_elbow'))
-          const leftWrist3 = to3(map.get('left_wrist'))
-          const rightWrist3 = to3(map.get('right_wrist'))
-          const leftKnee3 = to3(map.get('left_knee'))
-          const rightKnee3 = to3(map.get('right_knee'))
-          const leftAnkle3 = to3(map.get('left_ankle'))
-          const rightAnkle3 = to3(map.get('right_ankle'))
-          const hip3 = to3(hipMid || midpoint(leftHip, rightHip))
-          if (hip3) {
-            const desiredPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
-            lerpVector3(rig.mannequin.position, desiredPos, 0.18)
-            rig.lastValidPosition = desiredPos.clone()
-            const shoulderSpan = midpoint(leftShoulder3, rightShoulder3)
-            const hipSpan = midpoint(to3(map.get('left_hip')), to3(map.get('right_hip')))
-            const facingBase = shoulderSpan || hipSpan
-            if (facingBase && leftShoulder3 && rightShoulder3) {
-              const across = new THREE.Vector3().subVectors(rightShoulder3, leftShoulder3)
-              const forward = new THREE.Vector3(across.z, 0, -across.x).normalize()
-              if (forward.lengthSq() > 1e-6) {
-                const yaw = Math.atan2(forward.x, forward.z)
-                const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
-                slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.16)
-                rig.lastValidQuaternion = targetQuat.clone()
+          rig.lineSegments.visible = false
+          rig.joints.forEach((joint) => {
+            joint.visible = false
+          })
+
+          const desiredPos = new THREE.Vector3(root.x, MANNEQUIN_Y_OFFSET, root.z + MANNEQUIN_Z_OFFSET)
+          lerpVector3(rig.mannequin.position, desiredPos, 0.18)
+          rig.lastValidPosition = desiredPos.clone()
+
+          const targets = buildPresetKabaddiTargets({
+            root,
+            startRoot: posFromCourt(motionPlan?.startCourt) || root,
+            endRoot: posFromCourt(motionPlan?.endCourt) || nextRoot || root,
+            raiderRoot,
+            isRaider: Number(pid) === Number(raiderId),
+            preset: motionPlan?.preset || 'defender_guard',
+            progress: sceneProgress,
+            actorIndex: rig.index,
+          })
+          const yaw = Math.atan2(targets.forward.x, targets.forward.z)
+          const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
+          slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.16)
+          rig.lastValidQuaternion = targetQuat.clone()
+          const moveDir = new THREE.Vector3().subVectors(nextRoot || root, root)
+          moveDir.y = 0
+          const distToRaider = raiderRoot ? raiderRoot.distanceTo(root) : Infinity
+
+          if (rig.animationActions?.size) {
+            const targetActionKey = chooseAnimationState({
+              isRaider: Number(pid) === Number(raiderId),
+              progress: sceneProgress,
+              movement: moveDir,
+              moveDir,
+              previousMoveDir: rig.lastMoveDir,
+              distToRaider,
+            })
+            const nextAction = rig.animationActions.get(targetActionKey) || rig.animationActions.get('idle')
+            if (nextAction) {
+              if (rig.activeAction !== nextAction) {
+                if (rig.activeAction) rig.activeAction.crossFadeTo(nextAction, 0.28, true)
+                nextAction.reset()
+                nextAction.enabled = true
+                nextAction.setEffectiveWeight(1)
+                nextAction.play()
+                rig.activeAction = nextAction
+                rig.activeActionKey = targetActionKey
               }
+              for (const action of rig.animationActions.values()) {
+                if (action !== nextAction) action.enabled = true
+              }
+              rig.mixer.update(deltaSeconds)
             }
+          } else {
             if (rig.boneMap.hips) {
               const restHips = rig.restPose?.hips?.position
               rig.boneMap.hips.position.x = restHips?.x ?? 0
               rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
               rig.boneMap.hips.position.z = restHips?.z ?? 0
             }
+            applyBoneDirectionWeighted(rig.boneMap.spine, targets.hip, targets.chest, 0.22)
+            applyBoneDirectionWeighted(rig.boneMap.chest, targets.chest, targets.head, 0.18)
+            applyBoneDirectionWeighted(rig.boneMap.neck, targets.chest, targets.head, 0.12)
+            applyBoneDirectionWeighted(rig.boneMap.leftShoulder, targets.leftShoulder, targets.leftElbow, 0.14)
+            applyBoneDirectionWeighted(rig.boneMap.rightShoulder, targets.rightShoulder, targets.rightElbow, 0.14)
+            applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, targets.leftShoulder, targets.leftElbow, 0.48)
+            applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, targets.leftElbow, targets.leftWrist, 0.52)
+            applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, targets.rightShoulder, targets.rightElbow, 0.48)
+            applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, targets.rightElbow, targets.rightWrist, 0.52)
+            applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, targets.leftHip, targets.leftKnee, 0.4)
+            applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, targets.leftKnee, targets.leftAnkle, 0.5)
+            applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, targets.rightHip, targets.rightKnee, 0.4)
+            applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, targets.rightKnee, targets.rightAnkle, 0.5)
           }
+          rig.lastMoveDir = moveDir.lengthSq() > 1e-6 ? moveDir.clone().normalize() : rig.lastMoveDir
+
           if (rig.label) {
-            const head3 = to3(map.get('nose')) || to3(map.get('left_eye')) || to3(map.get('right_eye'))
-            const headHeight = head3 ? Math.max(1.15, head3.y + 0.28) : MANNEQUIN_TARGET_HEIGHT + 0.28
-            rig.label.position.set(0, headHeight, 0)
+            rig.label.position.set(0, MANNEQUIN_TARGET_HEIGHT + 0.32, 0)
           }
-
-          const chest3 = midpoint(leftShoulder3, rightShoulder3)
-
-          // Safer subset for this custom rig: avoid over-driving shoulder/hand/foot/head chains,
-          // which can collapse one side of the skinned mesh when local axes differ.
-          applyBoneDirectionWeighted(rig.boneMap.spine, hip3, chest3, 0.12)
-          applyBoneDirectionWeighted(rig.boneMap.chest, hip3, chest3, 0.1)
-
-          applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, leftShoulder3, leftElbow3, 0.42)
-          applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, leftElbow3, leftWrist3, 0.5)
-          applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, rightShoulder3, rightElbow3, 0.42)
-          applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, rightElbow3, rightWrist3, 0.5)
-
-          applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, hip3, leftKnee3, 0.34)
-          applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, leftKnee3, leftAnkle3, 0.44)
-          applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, hip3, rightKnee3, 0.34)
-          applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, rightKnee3, rightAnkle3, 0.44)
         }
       }
 

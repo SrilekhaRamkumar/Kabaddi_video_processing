@@ -569,6 +569,52 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
     _FRAME_GALLERY_HISTORY = {}
     _CONFIRMED_EVENT_MAT_ARCHIVE = {}
 
+    def _extract_dominant_palette(frame_bgr, bbox, k=4):
+        try:
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            h, w = frame_bgr.shape[:2]
+            x1 = max(0, min(w - 1, x1))
+            x2 = max(0, min(w, x2))
+            y1 = max(0, min(h - 1, y1))
+            y2 = max(0, min(h, y2))
+            if x2 <= x1 or y2 <= y1:
+                return []
+            crop = frame_bgr[y1:y2, x1:x2]
+            if crop.size == 0:
+                return []
+            sample = cv2.resize(
+                crop,
+                (
+                    max(12, min(32, crop.shape[1])),
+                    max(12, min(32, crop.shape[0])),
+                ),
+            )
+            pixels = sample.reshape((-1, 3)).astype(np.float32)
+            if pixels.shape[0] < 8:
+                return []
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 12, 1.0)
+            _compactness, labels, centers = cv2.kmeans(
+                pixels,
+                int(k),
+                None,
+                criteria,
+                2,
+                cv2.KMEANS_PP_CENTERS,
+            )
+            counts = np.bincount(labels.flatten(), minlength=int(k))
+            order = np.argsort(-counts)
+            palette = []
+            for idx in order[: int(k)]:
+                bgr = centers[int(idx)]
+                palette.append([
+                    int(np.clip(round(float(bgr[2])), 0, 255)),
+                    int(np.clip(round(float(bgr[1])), 0, 255)),
+                    int(np.clip(round(float(bgr[0])), 0, 255)),
+                ])
+            return palette
+        except Exception:
+            return []
+
     def _snapshot_frame_for_mat(frame_idx, gallery, raider_id):
         players = []
         try:
@@ -1080,6 +1126,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                     flow_count = int(len(flow_pts)) if flow_pts is not None else 0
                 except Exception:
                     flow_count = 0
+                dominant_colors = _extract_dominant_palette(frame, bb, k=4)
                 gallery_snapshot.append({
                     "id": int(pid),
                     "visible": bool(data.get("age", 0) == 0),
@@ -1089,6 +1136,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                     "court_pos": [float(m_pos[0]), float(m_pos[1])],
                     "bbox": [int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])],
                     "hsv_bins5": hsv_bins5,
+                    "dominant_colors": dominant_colors,
                     "flow_points": flow_count,
                 })
             gallery_snapshot.sort(key=lambda x: x["id"])

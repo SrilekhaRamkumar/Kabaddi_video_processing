@@ -516,113 +516,285 @@ function _speed(vel) {
   return Math.sqrt(vx * vx + vy * vy)
 }
 
+function hsvSwatchColor(binIdx, value, theme = 'dark') {
+  const strength = Math.max(0.08, Math.min(1, Number(value) || 0))
+  const hue = Math.round((binIdx / 5) * 360)
+  const sat = Math.round(42 + strength * 50)
+  const light = theme === 'dark' ? Math.round(28 + strength * 26) : Math.round(62 - strength * 16)
+  return `hsl(${hue} ${sat}% ${light}%)`
+}
 
-function GalleryGrid({ players, raiderId }) {
+function rgbSwatch(color) {
+  if (!Array.isArray(color) || color.length < 3) return 'rgb(148 163 184)'
+  const r = Math.max(0, Math.min(255, Number(color[0]) || 0))
+  const g = Math.max(0, Math.min(255, Number(color[1]) || 0))
+  const b = Math.max(0, Math.min(255, Number(color[2]) || 0))
+  return `rgb(${r} ${g} ${b})`
+}
+
+function playerContributionScore(pid, events, currentRaid, raiderId) {
+  let total = 0
+  for (const ev of Array.isArray(events) ? events : []) {
+    const sameRaid =
+      currentRaid?.raid_label ? String(ev?.raid_label || '') === String(currentRaid.raid_label) : true
+    if (!sameRaid) continue
+    const involved =
+      Number(ev?.subject) === Number(pid) ||
+      Number(ev?.object) === Number(pid)
+    if (!involved) continue
+    if (String(ev?.classifier_label || '').toLowerCase() === 'valid') total += 1
+    if (Number(pid) === Number(raiderId) && String(ev?.type || '').includes('BONUS')) total += 1
+  }
+  return total
+}
+
+function Speedometer({ value = 0, theme = 'dark' }) {
+  const v = Math.max(0, Number(value) || 0)
+  const capped = Math.min(1, v / 7)
+  const angle = -120 + capped * 240
+  const isDark = theme === 'dark'
+  const needleColor = isDark ? '#f5deb3' : '#7c5b2a'
+  const arcBg = isDark ? 'rgba(148,163,184,0.22)' : 'rgba(148,163,184,0.35)'
+  const arcFg = isDark ? 'rgba(226,232,240,0.92)' : 'rgba(51,65,85,0.92)'
+
+  return (
+    <div className="rounded-xl bg-white px-3 py-2 text-[11px] text-stone-600 dark:bg-stone-950/40 dark:text-stone-300">
+      <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">Speed</div>
+      <div className="mt-2 flex items-center gap-3">
+        <div className="relative h-14 w-20 shrink-0">
+          <svg viewBox="0 0 120 80" className="h-full w-full">
+            <path
+              d="M 16 64 A 44 44 0 0 1 104 64"
+              fill="none"
+              stroke={arcBg}
+              strokeWidth="10"
+              strokeLinecap="round"
+            />
+            <path
+              d="M 16 64 A 44 44 0 0 1 104 64"
+              fill="none"
+              stroke={arcFg}
+              strokeWidth="10"
+              strokeLinecap="round"
+              pathLength="100"
+              strokeDasharray={`${capped * 100} 100`}
+            />
+            <g transform={`rotate(${angle} 60 64)`}>
+              <line
+                x1="60"
+                y1="64"
+                x2="60"
+                y2="26"
+                stroke={needleColor}
+                strokeWidth="4"
+                strokeLinecap="round"
+              />
+            </g>
+            <circle cx="60" cy="64" r="5.5" fill={needleColor} />
+          </svg>
+        </div>
+        <div>
+          <div className="text-lg font-semibold tabular-nums text-stone-900 dark:text-stone-50">
+            {v.toFixed(2)}
+          </div>
+          <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">
+            units / frame
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TeamScoreboard({
+  players,
+  raiderId,
+  currentRaid,
+  teamScores = { A: 0, B: 0 },
+  events,
+  theme = 'dark',
+}) {
   if (!Array.isArray(players) || players.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-3 py-3 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-950/30 dark:text-stone-400">
-        No live gallery yet.
+        No live team board yet.
       </div>
     )
   }
 
-  const items = players.slice().sort((a, b) => (a?.id ?? 0) - (b?.id ?? 0))
+  const attackingTeam = currentRaid?.attacking_team || 'A'
+  const defendingTeam = attackingTeam === 'A' ? 'B' : 'A'
+  const isDark = theme === 'dark'
+  const items = players
+    .slice()
+    .sort((a, b) => {
+      const aRaid = Number(a?.id) === Number(raiderId) ? 0 : 1
+      const bRaid = Number(b?.id) === Number(raiderId) ? 0 : 1
+      return aRaid - bRaid || (a?.id ?? 0) - (b?.id ?? 0)
+    })
+
+  const grouped = { A: [], B: [] }
+  for (const p of items) {
+    const team = Number(p?.id) === Number(raiderId) ? attackingTeam : defendingTeam
+    grouped[team].push(p)
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3">
-      {items.map((p) => {
-        const isRaider = raiderId != null && Number(p?.id) === Number(raiderId)
-        const visible = !!p?.visible
-        const age = Number(p?.age ?? 0)
-        const spd = _speed(p?.velocity)
-        const flowPoints = Number(p?.flow_points ?? 0)
-        const hsv = Array.isArray(p?.hsv_bins5) ? p.hsv_bins5 : null
-        return (
-          <div
-            key={p?.id ?? Math.random()}
-            className="rounded-xl border border-stone-200 bg-white p-3 shadow-sm dark:border-stone-800 dark:bg-stone-950/20 dark:shadow-none"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="truncate text-xs font-semibold text-stone-900 dark:text-stone-50">
-                  {isRaider ? 'RAIDER' : _fmtPid(p?.id)}
+    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+      {[
+        { team: 'A', items: grouped.A },
+        { team: 'B', items: grouped.B },
+      ].map((section) => (
+        <div
+          key={section.team}
+          className="rounded-2xl border border-stone-200 bg-white/90 p-3 shadow-sm dark:border-stone-800 dark:bg-stone-950/25 dark:shadow-none"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <div className="text-sm font-semibold text-stone-900 dark:text-stone-50">
+                  Team {section.team}
                 </div>
-                <div className="mt-0.5 text-[11px] text-stone-600 dark:text-stone-400">
-                  {visible ? 'visible' : `lost (age ${age})`}
-                </div>
-              </div>
-              <div className="shrink-0">
-                {isRaider ? (
-                  <Badge tone="amber">focus</Badge>
-                ) : visible ? (
-                  <Badge tone="emerald">live</Badge>
+                {section.team === attackingTeam ? (
+                  <Badge tone="amber">attacking</Badge>
                 ) : (
-                  <Badge tone="slate">hold</Badge>
+                  <Badge tone="slate">defending</Badge>
                 )}
               </div>
-            </div>
-
-            <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-600 dark:text-stone-400">
-              <div className="rounded-lg bg-stone-50 px-2 py-1 dark:bg-stone-900/40">
-                <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">
-                  court
-                </div>
-                <div className="tabular-nums">
-                  {(p?.court_pos?.[0] ?? 0).toFixed?.(2) ?? '-'}w
-                </div>
-                <div className="tabular-nums">
-                  {(p?.court_pos?.[1] ?? 0).toFixed?.(2) ?? '-'}d
-                </div>
-              </div>
-              <div className="rounded-lg bg-stone-50 px-2 py-1 dark:bg-stone-900/40">
-                <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">
-                  speed
-                </div>
-                <div className="tabular-nums">{spd.toFixed(2)}</div>
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800">
-                  <div
-                    className="h-full rounded-full bg-stone-700/60 dark:bg-stone-200/60"
-                    style={{ width: `${Math.min(100, spd * 14)}%` }}
-                  />
-                </div>
+              <div className="mt-1 text-[11px] text-stone-600 dark:text-stone-400">
+                {currentRaid?.raid_label || 'live raid'} ? {section.items.length} player
+                {section.items.length === 1 ? '' : 's'}
               </div>
             </div>
-
-            <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-stone-600 dark:text-stone-400">
-              <div className="rounded-lg bg-stone-50 px-2 py-1 dark:bg-stone-900/40">
-                <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">
-                  flow pts
-                </div>
-                <div className="tabular-nums">{flowPoints}</div>
+            <div className="rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-right dark:border-stone-800 dark:bg-stone-900/50">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500 dark:text-stone-400">
+                Team Score
               </div>
-              <div className="rounded-lg bg-stone-50 px-2 py-1 dark:bg-stone-900/40">
-                <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">
-                  hsv bins
-                </div>
-                {hsv ? (
-                  <div className="mt-1 flex items-end gap-0.5">
-                    {hsv.slice(0, 5).map((v, idx) => {
-                      const n = Number(v) || 0
-                      const h = Math.max(2, Math.min(14, Math.round(n * 14)))
-                      return (
-                        <div
-                          key={idx}
-                          className="w-2 rounded-sm bg-stone-700/50 dark:bg-stone-200/40"
-                          style={{ height: `${h}px` }}
-                          title={String(n.toFixed?.(4) ?? n)}
-                        />
-                      )
-                    })}
-                  </div>
-                ) : (
-                  <div className="mt-1 text-[11px] text-stone-500 dark:text-stone-500">
-                    -
-                  </div>
-                )}
+              <div className="mt-1 text-2xl font-semibold tabular-nums text-stone-900 dark:text-stone-50">
+                {Number(teamScores?.[section.team] ?? 0)}
               </div>
             </div>
           </div>
-        )
-      })}
+
+          <div className="mt-3 space-y-2">
+            {section.items.length ? section.items.map((p) => {
+              const isRaider = raiderId != null && Number(p?.id) === Number(raiderId)
+              const visible = !!p?.visible
+              const age = Number(p?.age ?? 0)
+              const spd = _speed(p?.velocity)
+              const flowPoints = Number(p?.flow_points ?? 0)
+              const hsv = Array.isArray(p?.hsv_bins5) ? p.hsv_bins5 : []
+              const dominantColors = Array.isArray(p?.dominant_colors) ? p.dominant_colors : []
+              const individualScore = playerContributionScore(p?.id, events, currentRaid, raiderId)
+              const avatarBase = dominantColors.length >= 2
+                ? `linear-gradient(135deg, ${rgbSwatch(dominantColors[0])}, ${rgbSwatch(dominantColors[1])})`
+                : dominantColors.length === 1
+                  ? rgbSwatch(dominantColors[0])
+                  : hsv.length
+                    ? `linear-gradient(135deg, ${hsvSwatchColor(0, hsv[0], theme)}, ${hsvSwatchColor(2, hsv[2] ?? hsv[0], theme)})`
+                    : isDark
+                      ? 'linear-gradient(135deg, rgba(148,163,184,0.6), rgba(71,85,105,0.9))'
+                      : 'linear-gradient(135deg, rgba(226,232,240,1), rgba(148,163,184,0.9))'
+
+              return (
+                <div
+                  key={p?.id ?? Math.random()}
+                  className="rounded-2xl border border-stone-200 bg-stone-50/70 p-3 dark:border-stone-800 dark:bg-stone-900/35"
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl text-sm font-semibold text-white shadow-sm"
+                      style={{ background: avatarBase }}
+                    >
+                      {String(p?.id ?? '?').padStart(2, '0')}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="truncate text-sm font-semibold text-stone-900 dark:text-stone-50">
+                          {isRaider ? `Raider ? ${_fmtPid(p?.id)}` : _fmtPid(p?.id)}
+                        </div>
+                        {isRaider ? (
+                          <Badge tone="amber">focus</Badge>
+                        ) : visible ? (
+                          <Badge tone="emerald">live</Badge>
+                        ) : (
+                          <Badge tone="slate">hold</Badge>
+                        )}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-stone-600 dark:text-stone-400">
+                        <span>{visible ? 'visible now' : `lost (age ${age})`}</span>
+                        <span>court {Number(p?.court_pos?.[0] ?? 0).toFixed(2)}, {Number(p?.court_pos?.[1] ?? 0).toFixed(2)}</span>
+                        <span>bbox {Array.isArray(p?.bbox) ? p.bbox.map((v) => Math.round(Number(v) || 0)).join(', ') : '-'}</span>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-right dark:border-stone-800 dark:bg-stone-950/40">
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">
+                        Individual
+                      </div>
+                      <div className="mt-0.5 text-lg font-semibold tabular-nums text-stone-900 dark:text-stone-50">
+                        {individualScore}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 lg:grid-cols-4">
+                    <Speedometer value={spd} theme={theme} />
+                    <div className="rounded-xl bg-white px-3 py-2 text-[11px] text-stone-600 dark:bg-stone-950/40 dark:text-stone-300">
+                      <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">Flow Pts</div>
+                      <div className="mt-1 font-medium tabular-nums text-stone-900 dark:text-stone-50">{flowPoints}</div>
+                    </div>
+                    <div className="rounded-xl bg-white px-3 py-2 text-[11px] text-stone-600 dark:bg-stone-950/40 dark:text-stone-300">
+                      <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">Track Age</div>
+                      <div className="mt-1 font-medium tabular-nums text-stone-900 dark:text-stone-50">{age}</div>
+                    </div>
+                    <div className="rounded-xl bg-white px-3 py-2 text-[11px] text-stone-600 dark:bg-stone-950/40 dark:text-stone-300">
+                      <div className="text-[10px] uppercase tracking-wide text-stone-500 dark:text-stone-500">Role</div>
+                      <div className="mt-1 font-medium text-stone-900 dark:text-stone-50">{isRaider ? 'raider' : 'defender'}</div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 rounded-xl border border-stone-200 bg-white px-3 py-2 dark:border-stone-800 dark:bg-stone-950/40">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 dark:text-stone-400">
+                        Current Color Palette
+                      </div>
+                      <div className="text-[10px] text-stone-500 dark:text-stone-400">
+                        major colors inside bbox
+                      </div>
+                    </div>
+                    <div className="mt-2 grid grid-cols-4 gap-2">
+                      {(dominantColors.length ? dominantColors : []).slice(0, 4).map((color, idx) => (
+                        <div key={idx} className="min-w-0">
+                          <div
+                            className="h-11 rounded-xl"
+                            style={{
+                              background: rgbSwatch(color),
+                              boxShadow: isDark ? 'inset 0 0 0 1px rgba(255,255,255,0.08)' : 'inset 0 0 0 1px rgba(15,23,42,0.08)',
+                            }}
+                            title={`rgb(${color.join(', ')})`}
+                          />
+                          <div className="mt-1 truncate text-center text-[10px] tabular-nums text-stone-500 dark:text-stone-400">
+                            {Array.isArray(color) ? color.join(',') : '-'}
+                          </div>
+                        </div>
+                      ))}
+                      {!dominantColors.length ? (
+                        <div className="col-span-4 rounded-lg border border-dashed border-stone-200 bg-stone-50 px-3 py-2 text-[11px] text-stone-500 dark:border-stone-800 dark:bg-stone-900/30 dark:text-stone-400">
+                          Waiting for live dominant colors from the current bounding box.
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+              )
+            }) : (
+              <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-3 py-3 text-xs text-stone-600 dark:border-stone-800 dark:bg-stone-950/30 dark:text-stone-400">
+                No players mapped to Team {section.team} yet.
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -1652,9 +1824,19 @@ function App() {
         </div>
 
         <div className="mt-3">
-          <Panel title="Gallery" density="compact">
-            <div className="h-[320px] overflow-auto pr-1">
-              <GalleryGrid players={live?.gallery} raiderId={live?.raider_id} />
+          <Panel title="Team Board" density="compact">
+            <div className="h-[420px] overflow-auto pr-1">
+              <TeamScoreboard
+                players={live?.gallery}
+                raiderId={live?.raider_id}
+                currentRaid={live?.current_raid ?? archiveReview?.currentRaid ?? null}
+                teamScores={{
+                  A: displayedScoreboard.attacker,
+                  B: displayedScoreboard.defender,
+                }}
+                events={events}
+                theme={theme}
+              />
             </div>
           </Panel>
         </div>

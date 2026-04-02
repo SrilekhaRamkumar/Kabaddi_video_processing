@@ -47,8 +47,11 @@ const DEFAULT_SKELETON_EDGES = [
 const MANNEQUIN_TARGET_HEIGHT = 1.42
 const MANNEQUIN_Z_OFFSET = 0
 const MANNEQUIN_Y_OFFSET = 0.04
-const MANNEQUIN_ASSET_PATH = '/man2.glb'
-const MANNEQUIN_ASSET_LABEL = 'man2.glb'
+const MANNEQUIN_ASSET_PATH = '/mann.glb'
+const MANNEQUIN_ASSET_LABEL = 'mann.glb'
+const MANNEQUIN_RENDER_PIXEL_RATIO = 0.85
+const SCROLL_FRAME_DELTA_DIVISOR = 36
+const SCROLL_FRAME_DELTA_MAX = 8
 const RAID_REPLAY_CAMERA_LOCK_KEY = 'kabaddi-raid-replay-camera-lock-v1'
 const ANIMATION_ASSET_PATHS = {
   idle: '/Idle.fbx',
@@ -126,6 +129,7 @@ function buildRetargetNameMap(boneMap) {
   }
   assign(boneMap?.hips, 'mixamorigHips')
   assign(boneMap?.spine, 'mixamorigSpine')
+  assign(boneMap?.spineMid, 'mixamorigSpine1')
   assign(boneMap?.chest, 'mixamorigSpine2')
   assign(boneMap?.neck, 'mixamorigNeck')
   assign(boneMap?.head, 'mixamorigHead')
@@ -140,9 +144,11 @@ function buildRetargetNameMap(boneMap) {
   assign(boneMap?.leftUpperLeg, 'mixamorigLeftUpLeg')
   assign(boneMap?.leftLowerLeg, 'mixamorigLeftLeg')
   assign(boneMap?.leftFoot, 'mixamorigLeftFoot')
+  assign(boneMap?.leftToe, 'mixamorigLeftToeBase')
   assign(boneMap?.rightUpperLeg, 'mixamorigRightUpLeg')
   assign(boneMap?.rightLowerLeg, 'mixamorigRightLeg')
   assign(boneMap?.rightFoot, 'mixamorigRightFoot')
+  assign(boneMap?.rightToe, 'mixamorigRightToeBase')
   return map
 }
 
@@ -158,6 +164,17 @@ function _asInt(v, fb = null) {
 
 function _clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n))
+}
+
+function formatReplaySourceLabel(src) {
+  if (!src) return 'Kabaddi Replay'
+  try {
+    const raw = String(src).split('?')[0]
+    const last = raw.split('/').filter(Boolean).pop() || raw
+    return decodeURIComponent(last)
+  } catch {
+    return String(src)
+  }
 }
 
 function buildCourtLines(meta, color) {
@@ -229,6 +246,11 @@ function midpoint(a, b) {
   return out
 }
 
+function midpoint3(a, b) {
+  if (!a || !b) return null
+  return a.clone().add(b).multiplyScalar(0.5)
+}
+
 function estimateScaleMeters(poseMap) {
   const ys = Array.from(poseMap.values())
     .map((kp) => _asNum(kp?.y))
@@ -295,28 +317,36 @@ function findBoneByPattern(root, patterns) {
   return null
 }
 
+function mixamorigBonePattern(name) {
+  return new RegExp(`mixamorig\\d*:?${name}$`, 'i')
+}
+
 function buildBoneMap(root) {
   return {
     root: findBoneByPattern(root, [/^_rootjoint$/i, /^wiest$/i, /^root$/i]),
-    hips: findBoneByPattern(root, [/^hips?_/i, /^hips?$/i, /^hip$/i, /pelvis/i, /^wiest$/i, /root/i]),
-    spine: findBoneByPattern(root, [/^spine_?\d*/i, /^spine$/i, /^chest$/i, /spine1/i, /spine_01/i]),
-    chest: findBoneByPattern(root, [/^spine2_?\d*/i, /^spine1_?\d*/i, /^chest$/i, /spine2/i, /spine_02/i, /upperchest/i]),
+    hips: findBoneByPattern(root, [/^hips?_/i, /^hips?$/i, /^hip$/i, /pelvis/i, /^wiest$/i, /root/i, mixamorigBonePattern('Hips')]),
+    spine: findBoneByPattern(root, [/^spine_?\d*/i, /^spine$/i, /^chest$/i, /spine1/i, /spine_01/i, mixamorigBonePattern('Spine')]),
+    spineMid: findBoneByPattern(root, [/^spine1_?\d*/i, /spine1/i, /spine_02/i, mixamorigBonePattern('Spine1')]),
+    chest: findBoneByPattern(root, [/^spine2_?\d*/i, /^spine1_?\d*/i, /^chest$/i, /spine2/i, /spine_02/i, /upperchest/i, mixamorigBonePattern('Spine2')]),
     neck: findBoneByPattern(root, [/neck/i]),
     head: findBoneByPattern(root, [/head/i]),
-    leftShoulder: findBoneByPattern(root, [/^leftshoulder_/i, /^KTFL$/i, /leftshoulder/i, /leftclavicle/i, /l.*shoulder/i, /l.*clav/i]),
-    leftUpperArm: findBoneByPattern(root, [/^leftarm_/i, /^upperarmL$/i, /leftarm/i, /left_upperarm/i, /mixamorigleftarm/i, /upper.*arm.*l/i]),
-    leftLowerArm: findBoneByPattern(root, [/^leftforearm_/i, /^lowerarmL$/i, /leftforearm/i, /left_lowerarm/i, /mixamorigleftforearm/i, /lower.*arm.*l/i]),
-    leftHand: findBoneByPattern(root, [/^lefthand_/i, /^handL$/i, /lefthand/i, /mixamoriglefthand/i, /hand.*l/i]),
-    rightShoulder: findBoneByPattern(root, [/^rightshoulder_/i, /^KTFR$/i, /rightshoulder/i, /rightclavicle/i, /r.*shoulder/i, /r.*clav/i]),
-    rightUpperArm: findBoneByPattern(root, [/^rightarm_/i, /^upperarmR$/i, /rightarm/i, /right_upperarm/i, /mixamorigrightarm/i, /upper.*arm.*r/i]),
-    rightLowerArm: findBoneByPattern(root, [/^rightforearm_/i, /^lowerarmR$/i, /rightforearm/i, /right_lowerarm/i, /mixamorigrightforearm/i, /lower.*arm.*r/i]),
-    rightHand: findBoneByPattern(root, [/^righthand_/i, /^handR$/i, /righthand/i, /mixamorigrighthand/i, /hand.*r/i]),
-    leftUpperLeg: findBoneByPattern(root, [/^leftupleg_/i, /^upperlegL$/i, /leftupleg/i, /leftthigh/i, /mixamorigleftupleg/i, /upper.*leg.*l/i, /thigh.*l/i]),
-    leftLowerLeg: findBoneByPattern(root, [/^leftleg_/i, /^lowerlegL$/i, /leftleg/i, /leftcalf/i, /mixamorigleftleg/i, /lower.*leg.*l/i, /calf.*l/i]),
-    leftFoot: findBoneByPattern(root, [/^leftfoot_/i, /^footL$/i, /^tooseL$/i, /leftfoot/i, /mixamorigleftfoot/i, /foot.*l/i]),
-    rightUpperLeg: findBoneByPattern(root, [/^rightupleg_/i, /^upperlegR$/i, /rightupleg/i, /rightthigh/i, /mixamorigrightupleg/i, /upper.*leg.*r/i, /thigh.*r/i]),
-    rightLowerLeg: findBoneByPattern(root, [/^rightleg_/i, /^lowerlegR$/i, /rightleg/i, /rightcalf/i, /mixamorigrightleg/i, /lower.*leg.*r/i, /calf.*r/i]),
-    rightFoot: findBoneByPattern(root, [/^rightfoot_/i, /^footR$/i, /^tooseR$/i, /rightfoot/i, /mixamorigrightfoot/i, /foot.*r/i]),
+    headTop: findBoneByPattern(root, [/headtop/i, /head.*end/i, mixamorigBonePattern('HeadTop_End')]),
+    leftShoulder: findBoneByPattern(root, [/^leftshoulder_/i, /^KTFL$/i, /leftshoulder/i, /leftclavicle/i, /l.*shoulder/i, /l.*clav/i, mixamorigBonePattern('LeftShoulder')]),
+    leftUpperArm: findBoneByPattern(root, [/^leftarm_/i, /^upperarmL$/i, /leftarm/i, /left_upperarm/i, /mixamorigleftarm/i, /upper.*arm.*l/i, mixamorigBonePattern('LeftArm')]),
+    leftLowerArm: findBoneByPattern(root, [/^leftforearm_/i, /^lowerarmL$/i, /leftforearm/i, /left_lowerarm/i, /mixamorigleftforearm/i, /lower.*arm.*l/i, mixamorigBonePattern('LeftForeArm')]),
+    leftHand: findBoneByPattern(root, [/^lefthand_/i, /^handL$/i, /lefthand/i, /mixamoriglefthand/i, /hand.*l/i, mixamorigBonePattern('LeftHand')]),
+    rightShoulder: findBoneByPattern(root, [/^rightshoulder_/i, /^KTFR$/i, /rightshoulder/i, /rightclavicle/i, /r.*shoulder/i, /r.*clav/i, mixamorigBonePattern('RightShoulder')]),
+    rightUpperArm: findBoneByPattern(root, [/^rightarm_/i, /^upperarmR$/i, /rightarm/i, /right_upperarm/i, /mixamorigrightarm/i, /upper.*arm.*r/i, mixamorigBonePattern('RightArm')]),
+    rightLowerArm: findBoneByPattern(root, [/^rightforearm_/i, /^lowerarmR$/i, /rightforearm/i, /right_lowerarm/i, /mixamorigrightforearm/i, /lower.*arm.*r/i, mixamorigBonePattern('RightForeArm')]),
+    rightHand: findBoneByPattern(root, [/^righthand_/i, /^handR$/i, /righthand/i, /mixamorigrighthand/i, /hand.*r/i, mixamorigBonePattern('RightHand')]),
+    leftUpperLeg: findBoneByPattern(root, [/^leftupleg_/i, /^upperlegL$/i, /leftupleg/i, /leftthigh/i, /mixamorigleftupleg/i, /upper.*leg.*l/i, /thigh.*l/i, mixamorigBonePattern('LeftUpLeg')]),
+    leftLowerLeg: findBoneByPattern(root, [/^leftleg_/i, /^lowerlegL$/i, /leftleg/i, /leftcalf/i, /mixamorigleftleg/i, /lower.*leg.*l/i, /calf.*l/i, mixamorigBonePattern('LeftLeg')]),
+    leftFoot: findBoneByPattern(root, [/^leftfoot_/i, /^footL$/i, /^tooseL$/i, /leftfoot/i, /mixamorigleftfoot/i, /foot.*l/i, mixamorigBonePattern('LeftFoot')]),
+    leftToe: findBoneByPattern(root, [/lefttoe/i, /toebase.*l/i, mixamorigBonePattern('LeftToeBase'), mixamorigBonePattern('LeftToe_End')]),
+    rightUpperLeg: findBoneByPattern(root, [/^rightupleg_/i, /^upperlegR$/i, /rightupleg/i, /rightthigh/i, /mixamorigrightupleg/i, /upper.*leg.*r/i, /thigh.*r/i, mixamorigBonePattern('RightUpLeg')]),
+    rightLowerLeg: findBoneByPattern(root, [/^rightleg_/i, /^lowerlegR$/i, /rightleg/i, /rightcalf/i, /mixamorigrightleg/i, /lower.*leg.*r/i, /calf.*r/i, mixamorigBonePattern('RightLeg')]),
+    rightFoot: findBoneByPattern(root, [/^rightfoot_/i, /^footR$/i, /^tooseR$/i, /rightfoot/i, /mixamorigrightfoot/i, /foot.*r/i, mixamorigBonePattern('RightFoot')]),
+    rightToe: findBoneByPattern(root, [/righttoe/i, /toebase.*r/i, mixamorigBonePattern('RightToeBase'), mixamorigBonePattern('RightToe_End')]),
   }
 }
 
@@ -380,20 +410,142 @@ function applyBoneDirectionWeighted(bone, from, to, weight = 1) {
   bone.quaternion.slerp(localTarget, _clamp(weight, 0, 1))
 }
 
+function blendTarget(actual, fallback, fallbackWeight = 0.14) {
+  if (actual && fallback) return actual.clone().lerp(fallback, _clamp(fallbackWeight, 0, 1))
+  if (actual) return actual.clone()
+  if (fallback) return fallback.clone()
+  return null
+}
+
+function projectAlongBone(from, to, length) {
+  if (!from || !to || !Number.isFinite(Number(length))) return null
+  const dir = new THREE.Vector3().subVectors(to, from)
+  if (dir.lengthSq() < 1e-8) return null
+  dir.normalize()
+  return to.clone().addScaledVector(dir, length)
+}
+
+function buildPoseDrivenTargets({
+  posePoints,
+  fallbackTargets,
+  movementDir,
+}) {
+  const actualHip = midpoint3(posePoints.leftHip, posePoints.rightHip)
+  const actualChest = midpoint3(posePoints.leftShoulder, posePoints.rightShoulder)
+  const actualHead =
+    posePoints.nose ||
+    midpoint3(posePoints.leftEye, posePoints.rightEye) ||
+    midpoint3(posePoints.leftEar, posePoints.rightEar)
+
+  const hip = blendTarget(actualHip, fallbackTargets.hip, 0.08)
+  const chest = blendTarget(actualChest, fallbackTargets.chest, 0.1)
+  const head = blendTarget(actualHead, fallbackTargets.head, 0.2)
+  const neck = blendTarget(midpoint3(chest, head), midpoint3(fallbackTargets.chest, fallbackTargets.head), 0.2)
+  const spineMid = blendTarget(midpoint3(hip, chest), midpoint3(fallbackTargets.hip, fallbackTargets.chest), 0.14)
+
+  const leftShoulder = blendTarget(posePoints.leftShoulder, fallbackTargets.leftShoulder, 0.08)
+  const rightShoulder = blendTarget(posePoints.rightShoulder, fallbackTargets.rightShoulder, 0.08)
+  const leftElbow = blendTarget(posePoints.leftElbow, fallbackTargets.leftElbow, 0.1)
+  const rightElbow = blendTarget(posePoints.rightElbow, fallbackTargets.rightElbow, 0.1)
+  const leftWrist = blendTarget(posePoints.leftWrist, fallbackTargets.leftWrist, 0.12)
+  const rightWrist = blendTarget(posePoints.rightWrist, fallbackTargets.rightWrist, 0.12)
+  const leftHip = blendTarget(posePoints.leftHip, fallbackTargets.leftHip, 0.08)
+  const rightHip = blendTarget(posePoints.rightHip, fallbackTargets.rightHip, 0.08)
+  const leftKnee = blendTarget(posePoints.leftKnee, fallbackTargets.leftKnee, 0.1)
+  const rightKnee = blendTarget(posePoints.rightKnee, fallbackTargets.rightKnee, 0.1)
+  const leftAnkle = blendTarget(posePoints.leftAnkle, fallbackTargets.leftAnkle, 0.1)
+  const rightAnkle = blendTarget(posePoints.rightAnkle, fallbackTargets.rightAnkle, 0.1)
+
+  const move = movementDir && movementDir.lengthSq() > 1e-8 ? movementDir.clone().normalize() : fallbackTargets.forward.clone()
+  const leftHand = blendTarget(
+    projectAlongBone(leftElbow, leftWrist, 0.12),
+    projectAlongBone(fallbackTargets.leftElbow, fallbackTargets.leftWrist, 0.12),
+    0.25,
+  )
+  const rightHand = blendTarget(
+    projectAlongBone(rightElbow, rightWrist, 0.12),
+    projectAlongBone(fallbackTargets.rightElbow, fallbackTargets.rightWrist, 0.12),
+    0.25,
+  )
+  const leftFoot = blendTarget(
+    projectAlongBone(leftKnee, leftAnkle, 0.1) || (leftAnkle && move ? leftAnkle.clone().addScaledVector(move, 0.1) : null),
+    projectAlongBone(fallbackTargets.leftKnee, fallbackTargets.leftAnkle, 0.1),
+    0.22,
+  )
+  const rightFoot = blendTarget(
+    projectAlongBone(rightKnee, rightAnkle, 0.1) || (rightAnkle && move ? rightAnkle.clone().addScaledVector(move, 0.1) : null),
+    projectAlongBone(fallbackTargets.rightKnee, fallbackTargets.rightAnkle, 0.1),
+    0.22,
+  )
+  const leftToe = blendTarget(
+    leftFoot && move ? leftFoot.clone().addScaledVector(move, 0.08) : null,
+    fallbackTargets.leftAnkle && fallbackTargets.forward
+      ? fallbackTargets.leftAnkle.clone().addScaledVector(fallbackTargets.forward, 0.16)
+      : null,
+    0.28,
+  )
+  const rightToe = blendTarget(
+    rightFoot && move ? rightFoot.clone().addScaledVector(move, 0.08) : null,
+    fallbackTargets.rightAnkle && fallbackTargets.forward
+      ? fallbackTargets.rightAnkle.clone().addScaledVector(fallbackTargets.forward, 0.16)
+      : null,
+    0.28,
+  )
+  const headTop = blendTarget(
+    head && neck ? projectAlongBone(neck, head, 0.1) : null,
+    fallbackTargets.head && fallbackTargets.chest ? projectAlongBone(fallbackTargets.chest, fallbackTargets.head, 0.12) : null,
+    0.2,
+  )
+
+  return {
+    forward: move,
+    hip,
+    spineMid,
+    chest,
+    neck,
+    head,
+    headTop,
+    leftShoulder,
+    rightShoulder,
+    leftElbow,
+    rightElbow,
+    leftWrist,
+    rightWrist,
+    leftHand,
+    rightHand,
+    leftHip,
+    rightHip,
+    leftKnee,
+    rightKnee,
+    leftAnkle,
+    rightAnkle,
+    leftFoot,
+    rightFoot,
+    leftToe,
+    rightToe,
+  }
+}
+
 function tintModel(root, color, isDark) {
   root.traverse((obj) => {
     if (!obj?.isMesh || !obj.material) return
     obj.visible = true
-    obj.frustumCulled = false
+    obj.frustumCulled = true
     obj.castShadow = false
     obj.receiveShadow = false
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
     mats.forEach((mat) => {
       if (mat?.color) mat.color.copy(color)
-      if (mat?.emissive) mat.emissive.copy(color).multiplyScalar(isDark ? 0.18 : 0.08)
-      if ('transparent' in mat) mat.transparent = true
+      if (mat?.emissive) mat.emissive.copy(color).multiplyScalar(isDark ? 0.04 : 0.02)
+      if ('transparent' in mat) mat.transparent = false
       if ('opacity' in mat) mat.opacity = 1
-      if ('side' in mat) mat.side = THREE.DoubleSide
+      if ('alphaTest' in mat) mat.alphaTest = 0
+      if ('depthWrite' in mat) mat.depthWrite = true
+      if ('depthTest' in mat) mat.depthTest = true
+      if ('toneMapped' in mat) mat.toneMapped = false
+      if ('side' in mat) mat.side = THREE.FrontSide
+      if ('flatShading' in mat) mat.flatShading = false
+      if ('needsUpdate' in mat) mat.needsUpdate = true
     })
   })
 }
@@ -422,6 +574,24 @@ function normalizeModelPlacement(root) {
     root.userData.modelHeight = targetHeight
     root.userData.baseOffsetY = root.position.y
   }
+}
+
+function fitReplayCamera(camera, controls, focus, meta, aspect = 1) {
+  if (!camera || !controls || !focus || !meta) return
+  const safeAspect = Math.max(0.6, Number(aspect) || 1)
+  const fov = THREE.MathUtils.degToRad(camera.fov || 55)
+  const fitHeight = (meta.courtH || 6.5) * 1.05
+  const fitWidth = (meta.courtW || 10) / safeAspect
+  const fitSpan = Math.max(fitHeight, fitWidth)
+  const distance = Math.max(5.8, fitSpan / (2 * Math.tan(fov / 2)))
+  const camDir =
+    String(meta.camera).toLowerCase().includes('cam2')
+      ? new THREE.Vector3(-0.82, 0.48, 0.92)
+      : new THREE.Vector3(0.82, 0.48, 0.92)
+  camDir.normalize()
+  controls.target.copy(focus)
+  camera.position.copy(focus.clone().addScaledVector(camDir, distance * 1.08))
+  camera.lookAt(focus)
 }
 
 function lerpVector3(target, next, alpha = 0.22) {
@@ -879,6 +1049,21 @@ export default function RaidReplay3D({
     () => validFrameIndices.length,
     [validFrameIndices],
   )
+  const replayTitle = useMemo(
+    () => formatReplaySourceLabel(videoFileSrc || videoSrc || event?.clip_url || event?.video_path || event?.raid_label),
+    [videoFileSrc, videoSrc, event],
+  )
+  const participantSummary = useMemo(() => {
+    if (!participants.length) return 'No players'
+    return participants
+      .map((pid) => (Number(pid) === Number(raiderId) ? `Raider ${pid}` : `ID ${pid}`))
+      .join(' • ')
+  }, [participants, raiderId])
+  const replaySubtitle = useMemo(() => {
+    const frameStart = validFrameIndices[0] ?? 0
+    const frameEnd = validFrameIndices[Math.max(0, validFrameIndices.length - 1)] ?? 0
+    return `Frames ${frameStart}-${frameEnd} • ${participants.length} players • ${poseWindow?.length || 0} pose frames`
+  }, [validFrameIndices, participants.length, poseWindow])
   const [scrubValue, setScrubValue] = useState(0)
   const scrubBaseIndex = Math.floor(scrubValue)
   const scrubMix = Math.max(0, Math.min(1, scrubValue - scrubBaseIndex))
@@ -1055,8 +1240,11 @@ export default function RaidReplay3D({
 
     const scene = new THREE.Scene()
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1))
+    renderer.setPixelRatio(Math.min(MANNEQUIN_RENDER_PIXEL_RATIO, window.devicePixelRatio || 1))
     renderer.setClearColor(0x000000, 0)
+    renderer.domElement.style.width = '100%'
+    renderer.domElement.style.height = '100%'
+    renderer.domElement.style.display = 'block'
     el.appendChild(renderer.domElement)
 
     const camera = new THREE.PerspectiveCamera(55, 1, 0.01, 200)
@@ -1078,6 +1266,19 @@ export default function RaidReplay3D({
     const fill = new THREE.DirectionalLight(0xffffff, 0.35)
     fill.position.set(-4, 6, -3)
     scene.add(fill)
+    const spotlight = new THREE.SpotLight(
+      isDark ? 0xf8fafc : 0xffffff,
+      isDark ? 1.4 : 1.1,
+      28,
+      Math.PI * 0.32,
+      0.38,
+      1,
+    )
+    spotlight.position.set(0, 10.5, 1.2)
+    spotlight.target.position.set(0, 0, 0)
+    spotlight.castShadow = false
+    scene.add(spotlight)
+    scene.add(spotlight.target)
 
     const groundGeom = new THREE.PlaneGeometry(meta.courtW + 2, meta.courtH + 2)
     const groundMat = new THREE.MeshStandardMaterial({
@@ -1137,14 +1338,7 @@ export default function RaidReplay3D({
       const match = firstPlayers.find((player) => Number(player?.id) === Number(pid))
       return posFromCourt(match?.court_pos)
     }
-    controls.target.copy(focus)
-    const camDir =
-      String(meta.camera).toLowerCase().includes('cam2')
-        ? new THREE.Vector3(-0.85, 0, 1)
-        : new THREE.Vector3(0.85, 0, 1)
-    camDir.normalize()
-    camera.position.set(focus.x + camDir.x * 8.5, 5.6, focus.z + camDir.z * 8.5)
-    camera.lookAt(focus)
+    fitReplayCamera(camera, controls, focus, meta, 1)
     try {
       const raw = window.localStorage.getItem(RAID_REPLAY_CAMERA_LOCK_KEY)
       if (raw) {
@@ -1356,7 +1550,7 @@ export default function RaidReplay3D({
       const nextRenderScrub =
         Math.abs(targetScrub - prevRenderScrub) < 0.001
           ? targetScrub
-          : prevRenderScrub + (targetScrub - prevRenderScrub) * 0.18
+          : prevRenderScrub + (targetScrub - prevRenderScrub) * 0.55
       renderScrubRef.current = nextRenderScrub
       const currentLeftLogicalIndex = Math.min(
         Math.floor(nextRenderScrub),
@@ -1458,6 +1652,25 @@ export default function RaidReplay3D({
           const dz = (kp.x - anchor.x) * scale * 0.14
           return new THREE.Vector3(root.x + dx, Math.max(0.03, dy), root.z + dz)
         }
+        const posePoints = {
+          nose: to3(map.get('nose')),
+          leftEye: to3(map.get('left_eye')),
+          rightEye: to3(map.get('right_eye')),
+          leftEar: to3(map.get('left_ear')),
+          rightEar: to3(map.get('right_ear')),
+          leftShoulder: to3(map.get('left_shoulder')),
+          rightShoulder: to3(map.get('right_shoulder')),
+          leftElbow: to3(map.get('left_elbow')),
+          rightElbow: to3(map.get('right_elbow')),
+          leftWrist: to3(map.get('left_wrist')),
+          rightWrist: to3(map.get('right_wrist')),
+          leftHip: to3(map.get('left_hip')),
+          rightHip: to3(map.get('right_hip')),
+          leftKnee: to3(map.get('left_knee')),
+          rightKnee: to3(map.get('right_knee')),
+          leftAnkle: to3(map.get('left_ankle')),
+          rightAnkle: to3(map.get('right_ankle')),
+        }
 
         let visibleEdges = 0
         let cursor = 0
@@ -1490,8 +1703,8 @@ export default function RaidReplay3D({
           joint.position.copy(kp)
         })
 
-        const nose = to3(map.get('nose'))
-        const neck = midpoint(to3(map.get('left_shoulder')), to3(map.get('right_shoulder')))
+        const nose = posePoints.nose
+        const neck = midpoint3(posePoints.leftShoulder, posePoints.rightShoulder)
         if (nose && neck) {
           tmpMid.copy(nose).add(neck).multiplyScalar(0.5)
           tmpDir.subVectors(neck, nose)
@@ -1509,7 +1722,7 @@ export default function RaidReplay3D({
           lerpVector3(rig.mannequin.position, desiredPos, 0.18)
           rig.lastValidPosition = desiredPos.clone()
 
-          const targets = buildPresetKabaddiTargets({
+          const fallbackTargets = buildPresetKabaddiTargets({
             root,
             startRoot: posFromCourt(motionPlan?.startCourt) || root,
             endRoot: posFromCourt(motionPlan?.endCourt) || nextRoot || root,
@@ -1519,12 +1732,17 @@ export default function RaidReplay3D({
             progress: sceneProgress,
             actorIndex: rig.index,
           })
+          const moveDir = new THREE.Vector3().subVectors(nextRoot || root, root)
+          moveDir.y = 0
+          const targets = buildPoseDrivenTargets({
+            posePoints,
+            fallbackTargets,
+            movementDir: moveDir,
+          })
           const yaw = Math.atan2(targets.forward.x, targets.forward.z)
           const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
           slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.16)
           rig.lastValidQuaternion = targetQuat.clone()
-          const moveDir = new THREE.Vector3().subVectors(nextRoot || root, root)
-          moveDir.y = 0
           const distToRaider = raiderRoot ? raiderRoot.distanceTo(root) : Infinity
 
           if (rig.animationActions?.size) {
@@ -1552,27 +1770,34 @@ export default function RaidReplay3D({
               }
               rig.mixer.update(deltaSeconds)
             }
-          } else {
-            if (rig.boneMap.hips) {
-              const restHips = rig.restPose?.hips?.position
-              rig.boneMap.hips.position.x = restHips?.x ?? 0
-              rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
-              rig.boneMap.hips.position.z = restHips?.z ?? 0
-            }
-            applyBoneDirectionWeighted(rig.boneMap.spine, targets.hip, targets.chest, 0.22)
-            applyBoneDirectionWeighted(rig.boneMap.chest, targets.chest, targets.head, 0.18)
-            applyBoneDirectionWeighted(rig.boneMap.neck, targets.chest, targets.head, 0.12)
-            applyBoneDirectionWeighted(rig.boneMap.leftShoulder, targets.leftShoulder, targets.leftElbow, 0.14)
-            applyBoneDirectionWeighted(rig.boneMap.rightShoulder, targets.rightShoulder, targets.rightElbow, 0.14)
-            applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, targets.leftShoulder, targets.leftElbow, 0.48)
-            applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, targets.leftElbow, targets.leftWrist, 0.52)
-            applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, targets.rightShoulder, targets.rightElbow, 0.48)
-            applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, targets.rightElbow, targets.rightWrist, 0.52)
-            applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, targets.leftHip, targets.leftKnee, 0.4)
-            applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, targets.leftKnee, targets.leftAnkle, 0.5)
-            applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, targets.rightHip, targets.rightKnee, 0.4)
-            applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, targets.rightKnee, targets.rightAnkle, 0.5)
           }
+          if (rig.boneMap.hips) {
+            const restHips = rig.restPose?.hips?.position
+            rig.boneMap.hips.position.x = restHips?.x ?? 0
+            rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
+            rig.boneMap.hips.position.z = restHips?.z ?? 0
+          }
+          applyBoneDirectionWeighted(rig.boneMap.spine, targets.hip, targets.spineMid || targets.chest, 0.34)
+          applyBoneDirectionWeighted(rig.boneMap.spineMid, targets.spineMid || targets.hip, targets.chest, 0.36)
+          applyBoneDirectionWeighted(rig.boneMap.chest, targets.chest, targets.neck || targets.head, 0.34)
+          applyBoneDirectionWeighted(rig.boneMap.neck, targets.neck || targets.chest, targets.head, 0.3)
+          applyBoneDirectionWeighted(rig.boneMap.head, targets.head, targets.headTop || targets.head, 0.24)
+          applyBoneDirectionWeighted(rig.boneMap.leftShoulder, targets.leftShoulder, targets.leftElbow, 0.22)
+          applyBoneDirectionWeighted(rig.boneMap.rightShoulder, targets.rightShoulder, targets.rightElbow, 0.22)
+          applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, targets.leftShoulder, targets.leftElbow, 0.68)
+          applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, targets.leftElbow, targets.leftWrist, 0.72)
+          applyBoneDirectionWeighted(rig.boneMap.leftHand, targets.leftWrist, targets.leftHand, 0.56)
+          applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, targets.rightShoulder, targets.rightElbow, 0.68)
+          applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, targets.rightElbow, targets.rightWrist, 0.72)
+          applyBoneDirectionWeighted(rig.boneMap.rightHand, targets.rightWrist, targets.rightHand, 0.56)
+          applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, targets.leftHip, targets.leftKnee, 0.62)
+          applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, targets.leftKnee, targets.leftAnkle, 0.68)
+          applyBoneDirectionWeighted(rig.boneMap.leftFoot, targets.leftAnkle, targets.leftFoot, 0.44)
+          applyBoneDirectionWeighted(rig.boneMap.leftToe, targets.leftFoot, targets.leftToe, 0.4)
+          applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, targets.rightHip, targets.rightKnee, 0.62)
+          applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, targets.rightKnee, targets.rightAnkle, 0.68)
+          applyBoneDirectionWeighted(rig.boneMap.rightFoot, targets.rightAnkle, targets.rightFoot, 0.44)
+          applyBoneDirectionWeighted(rig.boneMap.rightToe, targets.rightFoot, targets.rightToe, 0.4)
           rig.lastMoveDir = moveDir.lengthSq() > 1e-6 ? moveDir.clone().normalize() : rig.lastMoveDir
 
           if (rig.label) {
@@ -1631,7 +1856,9 @@ export default function RaidReplay3D({
       const h = el.clientHeight || 1
       renderer.setSize(w, h, false)
       camera.aspect = w / h
+      if (!cameraLocked) fitReplayCamera(camera, controls, focus, meta, w / h)
       camera.updateProjectionMatrix()
+      controls.update()
     }
     const onWheel = (ev) => {
       const delta = Number(ev.deltaY || 0)
@@ -1652,8 +1879,16 @@ export default function RaidReplay3D({
       ev.preventDefault()
       // Scroll down -> forward in time, scroll up -> backward in time.
       const direction = delta === 0 ? 0 : delta > 0 ? 1 : -1
+      const scrollFrames = Math.max(
+        1,
+        Math.min(
+          SCROLL_FRAME_DELTA_MAX,
+          Math.round(Math.abs(delta) / SCROLL_FRAME_DELTA_DIVISOR),
+        ),
+      )
       const frameCount = totalFramesRef.current
-      const next = Math.max(0, Math.min(frameCount - 1, scrubValueRef.current + direction))
+      const next = Math.max(0, Math.min(frameCount - 1, scrubValueRef.current + direction * scrollFrames))
+      renderScrubRef.current = next
       setScrubValue(next)
       setScrollIndicator({
         frame: Math.round(next),
@@ -1684,6 +1919,8 @@ export default function RaidReplay3D({
     }
     const ro = new ResizeObserver(resize)
     ro.observe(el)
+    window.addEventListener('resize', resize)
+    document.addEventListener('fullscreenchange', resize)
     renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
     renderer.domElement.addEventListener('mousemove', onMouseMove)
     renderer.domElement.addEventListener('mouseleave', onMouseLeave)
@@ -1709,6 +1946,12 @@ export default function RaidReplay3D({
       liveControlsRef.current = null
       try {
         ro.disconnect()
+      } catch {
+        // ignore
+      }
+      try {
+        window.removeEventListener('resize', resize)
+        document.removeEventListener('fullscreenchange', resize)
       } catch {
         // ignore
       }
@@ -1811,7 +2054,7 @@ export default function RaidReplay3D({
         // ignore
       }
     }
-  }, [matWindow, poseWindow, participants, meta, keypointNames, skeletonEdges, isDark])
+  }, [matWindow, poseWindow, participants, meta, keypointNames, skeletonEdges, isDark, cameraLocked])
 
   const hasPoseWindow = Array.isArray(poseWindow) && poseWindow.length > 0
 
@@ -1827,18 +2070,18 @@ export default function RaidReplay3D({
         }}
       />
 
-      <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
-        3D stick-figure replay from archived YOLO poses
+      <div className="pointer-events-none absolute left-4 top-4 z-20 max-w-[min(62rem,72vw)] rounded-2xl border border-white/10 bg-black/28 px-4 py-3 text-white shadow-xl backdrop-blur-md">
+        <div className="text-lg font-semibold tracking-[0.02em] text-white/96">
+          {replayTitle}
+        </div>
+        <div className="mt-1 text-[12px] text-white/78">
+          {participantSummary}
+        </div>
+        <div className="mt-1 text-[11px] font-medium uppercase tracking-[0.12em] text-white/58">
+          {replaySubtitle}
+        </div>
       </div>
-      <div className="pointer-events-none absolute left-3 top-12 z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
-        poses {stats.detected} | matched {stats.matched} | frame {activeFrameIndex}
-      </div>
-      <div className="pointer-events-none absolute left-3 top-[84px] z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
-        mannequin {modelReady ? 'ready' : modelError ? 'fallback' : 'loading'}
-      </div>
-      <div className="pointer-events-none absolute left-3 top-[120px] z-20 rounded-full border border-white/10 bg-black/35 px-3 py-1 text-[11px] font-medium text-white backdrop-blur">
-        scroll: frames | Ctrl + scroll: zoom
-      </div>
+
       <button
         type="button"
         onClick={lockCurrentView}
@@ -1846,11 +2089,6 @@ export default function RaidReplay3D({
       >
         {cameraLocked ? 'Locked' : 'Lock'}
       </button>
-      {boneDebugSummary ? (
-        <div className="pointer-events-none absolute left-3 top-[156px] z-20 max-w-[42rem] rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-[11px] font-medium text-white/90 backdrop-blur">
-          {MANNEQUIN_ASSET_LABEL} bones: {boneDebugSummary}
-        </div>
-      ) : null}
       {scrollIndicator ? (
         <div className="pointer-events-none absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full border border-white/10 bg-black/55 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur">
           Frame {scrollIndicator.frame}

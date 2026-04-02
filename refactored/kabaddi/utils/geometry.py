@@ -6,6 +6,24 @@ import cv2
 import numpy as np
 
 
+def select_line_coordinates(video_path, lines_cam1, lines_cam2):
+    """
+    Select appropriate court line coordinates based on video path.
+
+    Args:
+        video_path: Path to the video file
+        lines_cam1: Court lines for Camera 1
+        lines_cam2: Court lines for Camera 2
+
+    Returns:
+        Tuple of (selected_lines, camera_name)
+    """
+    normalized_path = video_path.replace("\\", "/").lower()
+    if "/cam2/" in normalized_path:
+        return lines_cam2, "Cam2"
+    return lines_cam1, "Cam1"
+
+
 def line_eq(p1, p2):
     """Calculate line equation coefficients from two points."""
     x1, y1 = p1

@@ -3,6 +3,9 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 
+_NMS_FALLBACK_WARNED = False
+
+
 def _clamp(value, low=0.0, high=1.0):
     return max(low, min(high, float(value)))
 
@@ -109,7 +112,18 @@ def apply_optical_flow(prev_gray, gray, gallery):
 
 
 def run_yolo_detection(model, frame, device, conf_thresh):
-    results = model(frame, device=device, verbose=False)[0]
+    global _NMS_FALLBACK_WARNED
+    try:
+        results = model(frame, device=device, verbose=False)[0]
+    except NotImplementedError as exc:
+        error_text = str(exc)
+        if device == "cuda" and "torchvision::nms" in error_text:
+            if not _NMS_FALLBACK_WARNED:
+                print("CUDA NMS is unavailable in this environment. Falling back to CPU detection.")
+                _NMS_FALLBACK_WARNED = True
+            results = model(frame, device="cpu", verbose=False)[0]
+        else:
+            raise
     detections = []
     for box in results.boxes:
         conf = float(box.conf[0])

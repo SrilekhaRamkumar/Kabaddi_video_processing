@@ -1,4 +1,9 @@
+from pathlib import Path
+
+import cv2
 import numpy as np
+
+from touch_classifier_inference import TouchClassifierInference
 
 
 class ConfirmedWindowClassifierBridge:
@@ -10,8 +15,14 @@ class ConfirmedWindowClassifierBridge:
     of the pipeline.
     """
 
-    def __init__(self):
+    def __init__(self, checkpoint_path=None):
         self.history = []
+        base_dir = Path(__file__).resolve().parent
+        default_checkpoint = base_dir / "models" / "touch_classifier" / "best_model.pt"
+        self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else default_checkpoint
+        self.touch_inference = None
+        if self.checkpoint_path.exists():
+            self.touch_inference = TouchClassifierInference(self.checkpoint_path)
 
     def score_batch(self, classifier_inputs):
         results = []
@@ -24,8 +35,14 @@ class ConfirmedWindowClassifierBridge:
         frames = classifier_input.get("frames", [])
         payload = classifier_input.get("payload", {})
         features = self._featurize(payload, frames, event)
-        probabilities = self._score_probabilities(event["type"], features)
-        predicted_label = max(probabilities, key=probabilities.get) if probabilities else "uncertain"
+        if event["type"] == "CONFIRMED_RAIDER_DEFENDER_CONTACT" and self.touch_inference is not None and frames:
+            probabilities = self._predict_contact_probabilities(frames)
+            predicted_label = "valid" if probabilities.get("valid", 0.0) >= probabilities.get("invalid", 0.0) else "invalid"
+            model_name = "touch_classifier_best_model"
+        else:
+            probabilities = self._score_probabilities(event["type"], features)
+            predicted_label = max(probabilities, key=probabilities.get) if probabilities else "uncertain"
+            model_name = "heuristic_window_bridge_v1"
         result = {
             "event_key": (event["type"], event["frame"], event["subject"], event["object"]),
             "event_type": event["type"],
@@ -33,10 +50,28 @@ class ConfirmedWindowClassifierBridge:
             "probabilities": probabilities,
             "features": features,
             "guaranteed": probabilities.get("valid", 0.0) >= 0.82 and predicted_label == "valid",
-            "model_name": "heuristic_window_bridge_v1",
+            "model_name": model_name,
         }
         self.history.append(result)
         return result
+
+    def _predict_contact_probabilities(self, frames):
+        rgb_frames = []
+        for frame in frames:
+            if frame.ndim == 3:
+                rgb_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                rgb_frames.append(frame)
+        prediction = self.touch_inference.predict_frames(rgb_frames)
+        valid_touch = float(prediction["probabilities"].get("valid_touch", 0.0))
+        no_touch = float(prediction["probabilities"].get("no_touch", 0.0))
+        uncertain = float(max(0.0, 1.0 - max(valid_touch, no_touch)))
+        total = valid_touch + no_touch + uncertain + 1e-6
+        return {
+            "valid": valid_touch / total,
+            "invalid": no_touch / total,
+            "uncertain": uncertain / total,
+        }
 
     def _featurize(self, payload, frames, event):
         aggregates = payload.get("aggregates", {})

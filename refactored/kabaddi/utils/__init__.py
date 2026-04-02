@@ -9,6 +9,7 @@ from .geometry import (
     compute_homography,
     create_court_mat,
     court_to_pixel,
+    select_line_coordinates,
 )
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "compute_homography",
     "create_court_mat",
     "court_to_pixel",
+    "select_line_coordinates",
     "COURT_WIDTH",
     "COURT_HEIGHT",
     "BAULK_LINE_Y",

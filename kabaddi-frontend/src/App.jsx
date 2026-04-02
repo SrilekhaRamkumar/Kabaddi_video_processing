@@ -42,6 +42,23 @@ function Badge({ tone = 'slate', children }) {
   )
 }
 
+function PlayerAvatarIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 64 64"
+      className="h-9 w-9"
+      fill="none"
+    >
+      <circle cx="32" cy="24" r="11" fill="rgba(255,255,255,0.92)" />
+      <path
+        d="M16 54c1.8-10.2 8.8-16 16-16s14.2 5.8 16 16"
+        fill="rgba(255,255,255,0.92)"
+      />
+    </svg>
+  )
+}
+
 function Panel({ title, right, children, density = 'normal' }) {
   const headerPad =
     density === 'compact' ? 'px-3 py-2' : 'px-4 py-3'
@@ -196,12 +213,64 @@ function OverlayMjpegPlayer({
     if (!isFullscreen) setShow3D(false)
   }, [isFullscreen])
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    const onFullscreenChange = () => {
+      const active = document.fullscreenElement === wrapRef.current
+      setIsFullscreen(active)
+      if (!active) setShow3D(false)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isFullscreen || typeof document === 'undefined') return undefined
+
+    const { body, documentElement } = document
+    const prevBodyOverflow = body.style.overflow
+    const prevHtmlOverflow = documentElement.style.overflow
+    const prevBodyOverscroll = body.style.overscrollBehavior
+    const prevHtmlOverscroll = documentElement.style.overscrollBehavior
+
+    body.style.overflow = 'hidden'
+    documentElement.style.overflow = 'hidden'
+    body.style.overscrollBehavior = 'none'
+    documentElement.style.overscrollBehavior = 'none'
+
+    return () => {
+      body.style.overflow = prevBodyOverflow
+      documentElement.style.overflow = prevHtmlOverflow
+      body.style.overscrollBehavior = prevBodyOverscroll
+      documentElement.style.overscrollBehavior = prevHtmlOverscroll
+    }
+  }, [isFullscreen])
+
   const onFullscreen = async () => {
     if (!allowFullscreen) return
-    setIsFullscreen(true)
+    const el = wrapRef.current
+    if (!el?.requestFullscreen) {
+      setIsFullscreen(true)
+      return
+    }
+    try {
+      await el.requestFullscreen()
+      setIsFullscreen(true)
+    } catch {
+      setIsFullscreen(true)
+    }
   }
 
   const onCloseFullscreen = async () => {
+    try {
+      if (typeof document !== 'undefined' && document.fullscreenElement === wrapRef.current) {
+        await document.exitFullscreen()
+      }
+    } catch {
+      // ignore
+    }
     setIsFullscreen(false)
     setShow3D(false)
   }
@@ -241,7 +310,7 @@ function OverlayMjpegPlayer({
         ) : null}
       </div>
 
-      {isFullscreen ? (
+      {isFullscreen && typeof document !== 'undefined' && document.fullscreenElement !== wrapRef.current ? (
         <div
           className="fixed inset-0 z-[120] bg-black/55 backdrop-blur-sm"
           onMouseDown={(e) => {
@@ -254,10 +323,10 @@ function OverlayMjpegPlayer({
         ref={wrapRef}
         className={`overflow-hidden border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950/40 ${
           isFullscreen
-            ? 'fixed inset-4 z-[130] rounded-2xl shadow-2xl'
+            ? 'fixed inset-0 z-[130] rounded-none border-0 shadow-none'
             : 'relative rounded-xl'
         }`}
-        style={isFullscreen ? undefined : { height }}
+        style={isFullscreen ? { width: '100vw', height: '100vh' } : { height }}
       >
         {allowFullscreen && isFullscreen ? (
           <div className="absolute right-2 top-2 z-[120] flex items-center gap-2">
@@ -706,7 +775,7 @@ function TeamScoreboard({
                       className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl text-sm font-semibold text-white shadow-sm"
                       style={{ background: avatarBase }}
                     >
-                      {String(p?.id ?? '?').padStart(2, '0')}
+                      <PlayerAvatarIcon />
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">

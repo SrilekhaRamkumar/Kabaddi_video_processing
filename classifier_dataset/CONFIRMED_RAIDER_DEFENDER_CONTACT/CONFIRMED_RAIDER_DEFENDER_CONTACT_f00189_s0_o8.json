@@ -1,0 +1,177 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "frame": 189,
+    "window_start": 177,
+    "window_end": 199,
+    "core_window_start": 187,
+    "core_window_end": 189,
+    "subject": 0,
+    "object": 8,
+    "line_name": null,
+    "confidence": 0.8867137821744961,
+    "factor_confidence": 0.8478201111731637,
+    "requires_visual_confirmation": true
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "subject": 0,
+    "object": 8,
+    "line_name": null,
+    "window_frames": [
+      177,
+      178,
+      179,
+      180,
+      181,
+      182,
+      183,
+      184,
+      185,
+      186,
+      187,
+      188,
+      189,
+      190,
+      191,
+      192,
+      193,
+      194,
+      195,
+      196,
+      197,
+      198,
+      199
+    ],
+    "core_frames": [
+      187,
+      188,
+      189
+    ],
+    "temporal_trace": [
+      {
+        "frame": 177,
+        "visible_defenders": 10,
+        "best_contact_score": 0.8660166189074516,
+        "best_containment_score": 0.6775580048561096,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 178,
+        "visible_defenders": 10,
+        "best_contact_score": 0.8660166189074516,
+        "best_containment_score": 0.6731516122817993,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 179,
+        "visible_defenders": 9,
+        "best_contact_score": 0.8660166189074516,
+        "best_containment_score": 0.6599427461624146,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 180,
+        "visible_defenders": 10,
+        "best_contact_score": 0.8660166189074516,
+        "best_containment_score": 0.6483626961708069,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 181,
+        "visible_defenders": 9,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.6504867076873779,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 182,
+        "visible_defenders": 8,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.6734275817871094,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 183,
+        "visible_defenders": 9,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.7203984260559082,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 184,
+        "visible_defenders": 10,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.8444482684135437,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 185,
+        "visible_defenders": 8,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 186,
+        "visible_defenders": 9,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.35869595408439636,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 187,
+        "visible_defenders": 10,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.9506194591522217,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 188,
+        "visible_defenders": 7,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.0,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 189,
+        "visible_defenders": 9,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.6381921172142029,
+        "raider_to_endline": 1.7163949012756348
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.9126428961753845,
+      "avg_factor_confidence": 0.8478201111731637,
+      "peak_window_pair_score": 0.8871373566033126,
+      "peak_window_line_score": 1.0,
+      "peak_window_containment": 0.9506194591522217,
+      "visible_defenders": 9
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        8,
+        7,
+        6,
+        0
+      ],
+      "global_context": {
+        "visible_players": 10,
+        "visible_defenders": 9,
+        "raider_in_active_graph": true,
+        "max_influence": 85.87103254933271,
+        "mean_defender_depth": 3.2659788131713867,
+        "defender_width_span": 6.375053405761719,
+        "best_contact_score": 0.8086609939734141,
+        "best_containment_score": 0.6381921172142029,
+        "raider_to_endline": 1.7163949012756348
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "NO_TOUCH",
+  "notes": ""
+}

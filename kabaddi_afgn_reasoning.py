@@ -14,6 +14,9 @@ class KabaddiAFGNEngine:
             "high_confidence_actions": 0,
             "factor_consistency": 0.0,
         }
+        # Phase 1.5: Temporal hysteresis buffer for action denoising
+        self.action_buffer = {}  # {action_type: (frame_idx, confidence)}
+        self.current_frame_idx = 0
 
     def _new_raid_state(self):
         return {
@@ -44,6 +47,7 @@ class KabaddiAFGNEngine:
         }
 
     def process_frame_actions(self, scene_graph, proposals, confirmed_events, raider_id, frame_idx, gallery):
+        self.current_frame_idx = frame_idx  # Track current frame for hysteresis
         if raider_id is None or not scene_graph.get("nodes"):
             return self._empty_result()
 
@@ -175,14 +179,14 @@ class KabaddiAFGNEngine:
 
         baulk_factor = context["line_factor_map"].get((context["raider_id"], "BAULK"))
         if ry >= 3.55:
-            conf = self._line_touch_confidence(context["confirmed_events"], "CONFIRMED_RAIDER_BAULK_TOUCH", fallback=0.62 + min(0.25, (ry - 3.55) * 0.3))
+            conf = self._line_touch_confidence(context["confirmed_events"], "CONFIRMED_RAIDER_BAULK_TOUCH", fallback=0.65 + min(0.25, (ry - 3.55) * 0.25))
             conf = max(conf, self._line_factor_score(baulk_factor, fallback=0.0))
             actions.append(self._make_action("RAIDER_CROSSED_BAULK_LINE", context["frame_idx"], conf, "Raider crossed baulk line"))
             self.current_raid["baulk_crossed"] = True
 
         bonus_factor = context["line_factor_map"].get((context["raider_id"], "BONUS"))
         if ry >= 4.55:
-            conf = self._line_factor_score(bonus_factor, fallback=0.58 + min(0.25, (ry - 4.55) * 0.35))
+            conf = self._line_factor_score(bonus_factor, fallback=0.62 + min(0.25, (ry - 4.55) * 0.25))
             actions.append(self._make_action("RAIDER_CROSSED_BONUS_LINE", context["frame_idx"], conf, "Raider crossed bonus line"))
             self.current_raid["bonus_crossed"] = True
 
@@ -205,8 +209,12 @@ class KabaddiAFGNEngine:
         for defender_id, proposal, pair_score in context["pairwise_contacts"]:
             temporal_conf = self._temporal_event_confidence(confirmed_contact_events, defender_id)
             contact_conf = 0.65 * pair_score + 0.35 * temporal_conf
-            if contact_conf < 0.58:
+            # Phase 1.3: Soften threshold from 0.58 to 0.52 with decay for marginal contacts
+            if contact_conf < 0.52:
                 continue
+            # Apply confidence decay for sub-0.60 contacts (soft rejection)
+            if 0.52 <= contact_conf < 0.60:
+                contact_conf = contact_conf * (1.0 + 0.2 * (contact_conf - 0.52))
 
             actions.append(self._make_action(
                 "RAIDER_DEFENDER_CONTACT",
@@ -219,6 +227,8 @@ class KabaddiAFGNEngine:
             self.current_raid["lobby_activated"] = True
             self.current_raid["touched_defenders"].add(defender_id)
             self.touched_defenders.add(defender_id)
+            # Phase 1.5: Update action buffer for temporal hysteresis
+            self.action_buffer["RAIDER_DEFENDER_CONTACT"] = (context["frame_idx"], contact_conf)
 
         if len(self.current_raid["touched_defenders"]) >= 2:
             multi_conf = min(1.0, 0.62 + 0.1 * len(self.current_raid["touched_defenders"]))
@@ -231,7 +241,11 @@ class KabaddiAFGNEngine:
             ))
 
         if self.current_raid["lobby_activated"]:
-            actions.append(self._make_action("LOBBY_ACTIVATED", context["frame_idx"], 0.85, "Lobby activated after touch"))
+            lobby_conf = 0.85
+            # Phase 1.5: Boost if persistent over recent frames
+            if self._has_recent_action("RAIDER_DEFENDER_CONTACT", lookback=2):
+                lobby_conf = min(1.0, lobby_conf + 0.08)
+            actions.append(self._make_action("LOBBY_ACTIVATED", context["frame_idx"], lobby_conf, "Lobby activated after touch"))
 
         return self._dedupe_actions(actions)
 
@@ -257,6 +271,8 @@ class KabaddiAFGNEngine:
 
         if len(context["nearby_defenders"]) >= 2 and tackle_conf >= 0.6:
             actions.append(self._make_action("DEFENDER_ASSIST_TACKLE", context["frame_idx"], tackle_conf, "Multiple defenders are engaging the raider"))
+            # Phase 1.5: Update buffer for tackle momentum
+            self.action_buffer["DEFENDER_ASSIST_TACKLE"] = (context["frame_idx"], tackle_conf)
 
         if tackle_conf >= 0.68:
             actions.append(self._make_action("DEFENDER_TACKLE", context["frame_idx"], tackle_conf, "Defenders tackled the raider"))
@@ -264,9 +280,13 @@ class KabaddiAFGNEngine:
             self.current_raid["raider_caught"] = True
             self.current_raid["raid_ended"] = True
             self.current_raid["raider_out"] = True
+            # Phase 1.5: Update action buffer
+            self.action_buffer["DEFENDER_TACKLE"] = (context["frame_idx"], tackle_conf)
 
         if defenders_on_court <= 3 and tackle_conf >= 0.68:
             actions.append(self._make_action("SUPER_TACKLE_TRIGGER", context["frame_idx"], min(1.0, tackle_conf + 0.06), "Super tackle condition triggered"))
+            # Phase 1.5: Update action buffer
+            self.action_buffer["SUPER_TACKLE_TRIGGER"] = (context["frame_idx"], min(1.0, tackle_conf + 0.06))
 
         endline_contacts = [
             event for event in context["confirmed_events"]
@@ -406,6 +426,9 @@ class KabaddiAFGNEngine:
         return finalized
 
     def _consistency_scores(self, context):
+        """Phase 1.4: Per-action consistency scoring with additive penalties and floors.
+        Prevents cascading false negatives from one weak factor poisoning all actions.
+        """
         scores = {
             "contact_legality": 1.0,
             "bonus_legality": 1.0,
@@ -414,47 +437,82 @@ class KabaddiAFGNEngine:
             "lobby_legality": 1.0,
         }
 
+        # Contact legality: only consider pairwise contact strength, not other factors
         if not context["pairwise_contacts"]:
-            scores["contact_legality"] *= 0.65
+            scores["contact_legality"] = 0.75  # Degrade gracefully, don't multiply
         elif max(score for _, _, score in context["pairwise_contacts"]) < 0.55:
-            scores["contact_legality"] *= 0.8
+            scores["contact_legality"] = 0.85  # Less aggressive penalty
+        else:
+            scores["contact_legality"] = 1.0  # Good contact quality
 
+        # Bonus legality: only check defender visibility
         if context["global_context"].get("visible_defenders", 0) < 6:
-            scores["bonus_legality"] *= 0.7
+            scores["bonus_legality"] = 0.80  # Additive penalty instead of ×0.7
+        else:
+            scores["bonus_legality"] = 1.0
 
+        # Tackle legality: requires BOTH geometric pressure AND contact presence
+        # Stream A: geometric (defender proximity/containment)
+        geometric_score = 1.0
         if len(context["nearby_defenders"]) < 2:
-            scores["tackle_legality"] *= 0.72
+            geometric_score *= 0.85
         if context["raider_speed"] > 0.45:
-            scores["tackle_legality"] *= 0.78
+            geometric_score *= 0.88
         if context["global_context"].get("best_containment_score", 0.0) < 0.18:
-            scores["tackle_legality"] *= 0.82
+            geometric_score *= 0.90
+        
+        # Stream B: contact requirement (only trust tackle if contact was seen)
+        has_recent_contact = self._has_recent_action("RAIDER_DEFENDER_CONTACT", lookback=3)
+        contact_stream = 1.0 if has_recent_contact else 0.75
+        
+        # Blend: 60% geometric + 40% contact presence
+        scores["tackle_legality"] = 0.6 * geometric_score + 0.4 * contact_stream
 
+        # Return legality: only if some contact/bonus happened
         if not self.current_raid["touch_occurred"] and not self.current_raid["bonus_touch"]:
-            scores["return_legality"] *= 0.75
+            scores["return_legality"] = 0.80
+        else:
+            scores["return_legality"] = 1.0
 
+        # Lobby legality: only check raider position, account for legitimacy of lobby access
         rx = context["raider_pos"][0]
         if 0.75 <= rx <= 9.25:
-            scores["lobby_legality"] *= 0.65
-        if self.current_raid["touch_occurred"]:
-            scores["lobby_legality"] *= 0.85
+            scores["lobby_legality"] = 0.75  # In main court, lobby is risky
+        elif self.current_raid["touch_occurred"]:
+            scores["lobby_legality"] = 0.95  # Post-contact lobby is legitimate
+        else:
+            scores["lobby_legality"] = 0.70  # Pre-contact lobby is illegal
 
         return scores
 
     def _apply_consistency_to_actions(self, actions, consistency_scores):
+        """Phase 1.1: Apply consistency scores with additive penalties and minimum floor.
+        Prevents cascading false negatives from multiplicative penalties.
+        """
         adjusted = []
         for action in actions:
             confidence = action["confidence"]
+            
+            # Determine which consistency factor applies
+            applied_factor = 1.0
             if action["type"] in {"RAIDER_DEFENDER_CONTACT", "RAIDER_MULTIPLE_DEFENDER_TOUCH", "LOBBY_ACTIVATED"}:
-                confidence *= consistency_scores["contact_legality"]
+                applied_factor = consistency_scores["contact_legality"]
             elif action["type"] in {"RAIDER_CROSSED_BONUS_LINE", "RAIDER_BONUS_TOUCH"}:
-                confidence *= consistency_scores["bonus_legality"]
+                applied_factor = consistency_scores["bonus_legality"]
             elif action["type"] in {"DEFENDER_ASSIST_TACKLE", "DEFENDER_TACKLE", "RAIDER_CAUGHT", "SUPER_TACKLE_TRIGGER"}:
-                confidence *= consistency_scores["tackle_legality"]
+                applied_factor = consistency_scores["tackle_legality"]
             elif action["type"] == "RAIDER_RETURNED_MIDDLE":
-                confidence *= consistency_scores["return_legality"]
+                applied_factor = consistency_scores["return_legality"]
             elif action["type"] in {"RAIDER_LOBBY_ENTRY", "RAIDER_ILLEGAL_LOBBY_ENTRY"}:
-                confidence *= consistency_scores["lobby_legality"]
-
+                applied_factor = consistency_scores["lobby_legality"]
+            
+            # Phase 1.1: Replace multiplicative with floor-based logic
+            # If legality factor < 1.0, use it as a confidence floor: don't drop below (original * factor)
+            # This prevents cascading multipliers like 0.62 * 0.65 * 0.82 * 0.75
+            if applied_factor < 1.0:
+                confidence_floor = confidence * applied_factor
+                confidence = max(confidence_floor, confidence - 0.10)  # Don't degrade more than 10 percentage points
+            
             action = dict(action)
             action["confidence"] = float(np.clip(confidence, 0.0, 1.0))
             action["consistency"] = {
@@ -470,6 +528,13 @@ class KabaddiAFGNEngine:
     def _reset_raid_state(self):
         self.current_raid = self._new_raid_state()
         self.touched_defenders.clear()
+
+    def _has_recent_action(self, action_type, lookback=3):
+        """Phase 1.5: Check if action was seen within last N frames for temporal hysteresis."""
+        if action_type not in self.action_buffer:
+            return False
+        frame_idx, _ = self.action_buffer[action_type]
+        return (self.current_frame_idx - frame_idx) <= lookback
 
     def _make_action(self, action_type, frame_idx, confidence, description, metadata=None):
         action = {
@@ -569,7 +634,8 @@ class KabaddiAFGNEngine:
         if line_factor is None:
             return fallback
         features = line_factor["features"]
-        distance_score = max(0.0, 1.0 - features["distance"] / 0.35)
+        # Phase 1.2: Relax distance threshold from 0.35 to 0.50 (accounts for tracking noise)
+        distance_score = max(0.0, 1.0 - features["distance"] / 0.50)
         active_bonus = 0.15 if features["active"] else 0.0
         confidence = 0.65 * distance_score + 0.35 * features["track_confidence"] + active_bonus
         return float(np.clip(max(fallback, confidence), 0.0, 1.0))

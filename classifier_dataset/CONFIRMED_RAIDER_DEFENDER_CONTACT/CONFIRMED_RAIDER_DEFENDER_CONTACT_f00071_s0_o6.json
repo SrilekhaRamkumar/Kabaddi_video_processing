@@ -1,0 +1,98 @@
+{
+  "event": {
+    "type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "frame": 71,
+    "window_start": 60,
+    "window_end": 81,
+    "core_window_start": 70,
+    "core_window_end": 71,
+    "subject": 0,
+    "object": 6,
+    "line_name": null,
+    "confidence": 0.6714250399380741,
+    "factor_confidence": 0.5014213506653453,
+    "requires_visual_confirmation": true
+  },
+  "payload": {
+    "event_type": "CONFIRMED_RAIDER_DEFENDER_CONTACT",
+    "event_family": "HHI",
+    "subject": 0,
+    "object": 6,
+    "line_name": null,
+    "window_frames": [
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81
+    ],
+    "core_frames": [
+      70,
+      71
+    ],
+    "temporal_trace": [
+      {
+        "frame": 70,
+        "visible_defenders": 6,
+        "best_contact_score": 0.303411195675532,
+        "best_containment_score": 0.37596994638442993,
+        "raider_to_endline": 1.7163949012756348
+      },
+      {
+        "frame": 71,
+        "visible_defenders": 5,
+        "best_contact_score": 0.42507192492485046,
+        "best_containment_score": 0.4106582701206207,
+        "raider_to_endline": 1.7163949012756348
+      }
+    ],
+    "aggregates": {
+      "avg_proposal_confidence": 0.7847608327865601,
+      "avg_factor_confidence": 0.5014213506653453,
+      "peak_window_pair_score": 0.529584104660785,
+      "peak_window_line_score": 1.0,
+      "peak_window_containment": 0.4106582701206207,
+      "visible_defenders": 5
+    },
+    "graph_snapshot": {
+      "active_node_ids": [
+        6,
+        2,
+        3,
+        0
+      ],
+      "global_context": {
+        "visible_players": 6,
+        "visible_defenders": 5,
+        "raider_in_active_graph": true,
+        "max_influence": 19.066628105664854,
+        "mean_defender_depth": 3.117781162261963,
+        "defender_width_span": 5.884016036987305,
+        "best_contact_score": 0.42507192492485046,
+        "best_containment_score": 0.4106582701206207,
+        "raider_to_endline": 1.7163949012756348
+      }
+    },
+    "clip_ready": true
+  },
+  "label": "NO_TOUCH",
+  "notes": ""
+}

@@ -53,3 +53,6 @@ kabaddi-frontend/.npm-cache/
 kabaddi-frontend/.vite/
 kabaddi-frontend/.env
 kabaddi-frontend/.env.*
+
+react-dashboard/node_modules/
+react-dashboard/.next/

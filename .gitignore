@@ -54,4 +54,5 @@ kabaddi-frontend/.vite/
 kabaddi-frontend/.env
 kabaddi-frontend/.env.*
 
-react-dashboard/
+react-dashboard/node_modules/
+react_dashboard

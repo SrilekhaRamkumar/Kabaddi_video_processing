@@ -11,7 +11,7 @@ import glob
 import re
 from classifier_bridge import ConfirmedWindowClassifierBridge
 from dataset_exporter import ConfirmedWindowDatasetExporter
-from kabaddi_afgn_reasoning import KabaddiAFGNEngine
+# from kabaddi_afgn_reasoning import KabaddiAFGNEngine  # (LEGACY - Replaced by GNN)
 from interaction_graph import InteractionProposalEngine, ActiveFactorGraphNetwork, render_graph_panel
 from interaction_logic import build_player_states, process_interactions
 from raider_logic import collect_raider_stats, assign_raider
@@ -81,7 +81,13 @@ cursor_court_pos = None
 LINE_MARGIN = 0.6 
 proposal_engine = InteractionProposalEngine()  # interaction_graph.InteractionProposalEngine
 graph_engine = ActiveFactorGraphNetwork(top_k=4)  # interaction_graph.ActiveFactorGraphNetwork
-action_engine = KabaddiAFGNEngine()  # kabaddi_afgn_reasoning.KabaddiAFGNEngine
+
+# --- NEW GNN INFERENCE ENGINE ---
+from afgn_gnn.inference import AFGNEngineInference
+# Loads the weights we just trained on your real videos!
+action_engine = AFGNEngineInference(model_path="afgn_gnn/model_weights_real.pt", device="cuda" if torch.cuda.is_available() else "cpu")
+# --------------------------------
+
 candidate_manager = TemporalInteractionCandidateManager()  # temporal_events.TemporalInteractionCandidateManager
 report_builder = ConfirmedInteractionReportBuilder(max_buffer_frames=300)  # report_video.ConfirmedInteractionReportBuilder
 classifier_bridge = ConfirmedWindowClassifierBridge()  # classifier_bridge.ConfirmedWindowClassifierBridge
@@ -991,16 +997,28 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                 if graph_engine.adjacency_matrix.size > 0:
                     print(f"     {graph_engine.adjacency_matrix[:2, :2]}")
 
-                # PHASE 2: Action Recognition and Point Calculation
-                action_results = action_engine.process_frame_actions(  # kabaddi_afgn_reasoning.KabaddiAFGNEngine.process_frame_actions
-                    scene_graph, 
-                    proposal_engine.candidate_proposals, 
-                    CONFIRMED_EVENT_LOG,
-                    RAIDER_ID, 
-                    frame_idx,
-                    GALLERY,
-                )
+                # --- GNN LIVE REASONING INFERENCE ---
+                # The GNN returns pure prob-based events
+                gnn_out = action_engine.process_frame(scene_graph, RAIDER_ID)
+                
+                # We adapt the GNN output to match the expected legacy format 
+                # so the rest of the frontend and scoring can render successfully.
+                action_results = {
+                    "actions": gnn_out["emitted_events"],
+                    "total_points": {"attacker": 0, "defender": 0},
+                    "raid_ended": gnn_out["raid_ended"],
+                    "points_scored": 0
+                }
+                
+                # Simple rule bridging: If tackle emitted, defense scores. If returned, raider scores touches.
+                touch_count = sum(1 for e in gnn_out["emitted_events"] if e["type"] == "RAIDER_DEFENDER_CONTACT")
+                if touch_count > 0 and any(e["type"] == "RAIDER_RETURNED_MIDDLE" for e in gnn_out["emitted_events"]):
+                    action_results["total_points"]["attacker"] = touch_count
+                if any(e["type"] == "DEFENDER_TACKLE" for e in gnn_out["emitted_events"]):
+                    action_results["total_points"]["defender"] = 1
+                
                 last_action_results = action_results
+                # --------------------------------------------------
             
                 total_score = action_results['total_points']
                 attacker_total = int(total_score.get('attacker', 0))
@@ -1053,7 +1071,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                             "confidence": float(conf),
                             "highlight": bool(int(action.get("points", 0)) > 0),
                         })
-                    print(f"  ?????? {action['type']}: {action['description']} | Points: {action.get('points', 0)} | Conf: {conf:.2f}")
+                    print(f"  🎯 {action['type']}: {action.get('description', '')} | Points: {action.get('points', 0)} | Conf: {conf:.2f}")
                 print(f"  └─ Frame Points: {action_results['points_scored']} | Total Points: {action_results['total_points']}")
                 print(
                     f"     Scoreboard A/D: {total_score['attacker']}/{total_score['defender']} "
@@ -1408,6 +1426,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
             time.sleep(max(0.0, float(FPS_DELAY)) / 1000.0)
 
     print("Total number of Interactions: ", INTERACTION_COUNT)
+    
     if out is not None:
         out.release()
     if report_builder.has_segments():

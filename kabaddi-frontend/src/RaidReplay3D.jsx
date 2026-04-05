@@ -66,6 +66,40 @@ let mannequinAssetPromise = null
 let animationAssetsPromise = null
 let mannequinBoneDebugPrinted = false
 
+function normalizeMixamoBoneName(name) {
+  const raw = String(name || '').trim()
+  if (!raw) return raw
+  const withoutNamespace = raw.includes(':') ? raw.split(':').pop() : raw
+  const compact = withoutNamespace.replace(/\s+/g, '')
+  if (/^mixamorig/i.test(compact)) {
+    return `mixamorig${compact.replace(/^mixamorig\d*/i, '')}`
+  }
+  return compact
+}
+
+function normalizeAnimationClipTrackNames(clip) {
+  if (!clip) return clip
+  const cloned = clip.clone()
+  cloned.tracks = cloned.tracks.map((track) => {
+    const dotIndex = String(track.name || '').indexOf('.')
+    if (dotIndex <= 0) return track.clone()
+    const nodeName = track.name.slice(0, dotIndex)
+    const suffix = track.name.slice(dotIndex)
+    const nextTrack = track.clone()
+    nextTrack.name = `${normalizeMixamoBoneName(nodeName)}${suffix}`
+    return nextTrack
+  })
+  return cloned
+}
+
+function normalizeAnimationRootBones(root) {
+  root.traverse((obj) => {
+    if (!obj?.isBone) return
+    obj.name = normalizeMixamoBoneName(obj.name)
+  })
+  return root
+}
+
 function loadMannequinAsset() {
   if (!mannequinAssetPromise) {
     mannequinAssetPromise = new Promise((resolve, reject) => {
@@ -98,8 +132,10 @@ function loadAnimationAssets() {
                     rej(new Error(`No animation clip found in ${path}`))
                     return
                   }
-                  clip.name = key
-                  res([key, { root: fbx, clip }])
+                  const normalizedRoot = normalizeAnimationRootBones(fbx)
+                  const normalizedClip = normalizeAnimationClipTrackNames(clip)
+                  normalizedClip.name = key
+                  res([key, { root: normalizedRoot, clip: normalizedClip }])
                 },
                 undefined,
                 (err) => rej(err),
@@ -1367,12 +1403,12 @@ export default function RaidReplay3D({
 
     const rigColor = (idx, pid) =>
       Number(pid) === Number(raiderId)
-        ? new THREE.Color(isDark ? 0xfbbf24 : 0xb45309)
+        ? new THREE.Color(isDark ? 0xffffff : 0x111827)
         : idx === 0
-          ? new THREE.Color(isDark ? 0xf5deb3 : 0x8b6b2f)
+          ? new THREE.Color(isDark ? 0xffffff : 0x111827)
           : idx === 1
-            ? new THREE.Color(isDark ? 0xe2e8f0 : 0x1f2937)
-            : new THREE.Color(isDark ? 0x94a3b8 : 0x475569)
+            ? new THREE.Color(isDark ? 0xf8fafc : 0x1f2937)
+            : new THREE.Color(isDark ? 0xe2e8f0 : 0x334155)
 
     for (let i = 0; i < participants.length; i++) {
       const pid = Number(participants[i])
@@ -1734,18 +1770,21 @@ export default function RaidReplay3D({
           })
           const moveDir = new THREE.Vector3().subVectors(nextRoot || root, root)
           moveDir.y = 0
-          const targets = buildPoseDrivenTargets({
-            posePoints,
-            fallbackTargets,
-            movementDir: moveDir,
-          })
-          const yaw = Math.atan2(targets.forward.x, targets.forward.z)
+          const useAnimationDrivenRig = Boolean(rig.animationActions?.size)
+          const targets = useAnimationDrivenRig
+            ? fallbackTargets
+            : buildPoseDrivenTargets({
+                posePoints,
+                fallbackTargets,
+                movementDir: moveDir,
+              })
+          const yaw = Math.atan2((targets.forward || fallbackTargets.forward).x, (targets.forward || fallbackTargets.forward).z)
           const targetQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw)
           slerpQuaternion(rig.mannequin.quaternion, targetQuat, 0.16)
           rig.lastValidQuaternion = targetQuat.clone()
           const distToRaider = raiderRoot ? raiderRoot.distanceTo(root) : Infinity
 
-          if (rig.animationActions?.size) {
+          if (useAnimationDrivenRig) {
             const targetActionKey = chooseAnimationState({
               isRaider: Number(pid) === Number(raiderId),
               progress: sceneProgress,
@@ -1770,34 +1809,35 @@ export default function RaidReplay3D({
               }
               rig.mixer.update(deltaSeconds)
             }
+          } else {
+            if (rig.boneMap.hips) {
+              const restHips = rig.restPose?.hips?.position
+              rig.boneMap.hips.position.x = restHips?.x ?? 0
+              rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
+              rig.boneMap.hips.position.z = restHips?.z ?? 0
+            }
+            applyBoneDirectionWeighted(rig.boneMap.spine, targets.hip, targets.spineMid || targets.chest, 0.34)
+            applyBoneDirectionWeighted(rig.boneMap.spineMid, targets.spineMid || targets.hip, targets.chest, 0.36)
+            applyBoneDirectionWeighted(rig.boneMap.chest, targets.chest, targets.neck || targets.head, 0.34)
+            applyBoneDirectionWeighted(rig.boneMap.neck, targets.neck || targets.chest, targets.head, 0.3)
+            applyBoneDirectionWeighted(rig.boneMap.head, targets.head, targets.headTop || targets.head, 0.24)
+            applyBoneDirectionWeighted(rig.boneMap.leftShoulder, targets.leftShoulder, targets.leftElbow, 0.22)
+            applyBoneDirectionWeighted(rig.boneMap.rightShoulder, targets.rightShoulder, targets.rightElbow, 0.22)
+            applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, targets.leftShoulder, targets.leftElbow, 0.68)
+            applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, targets.leftElbow, targets.leftWrist, 0.72)
+            applyBoneDirectionWeighted(rig.boneMap.leftHand, targets.leftWrist, targets.leftHand, 0.56)
+            applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, targets.rightShoulder, targets.rightElbow, 0.68)
+            applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, targets.rightElbow, targets.rightWrist, 0.72)
+            applyBoneDirectionWeighted(rig.boneMap.rightHand, targets.rightWrist, targets.rightHand, 0.56)
+            applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, targets.leftHip, targets.leftKnee, 0.62)
+            applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, targets.leftKnee, targets.leftAnkle, 0.68)
+            applyBoneDirectionWeighted(rig.boneMap.leftFoot, targets.leftAnkle, targets.leftFoot, 0.44)
+            applyBoneDirectionWeighted(rig.boneMap.leftToe, targets.leftFoot, targets.leftToe, 0.4)
+            applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, targets.rightHip, targets.rightKnee, 0.62)
+            applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, targets.rightKnee, targets.rightAnkle, 0.68)
+            applyBoneDirectionWeighted(rig.boneMap.rightFoot, targets.rightAnkle, targets.rightFoot, 0.44)
+            applyBoneDirectionWeighted(rig.boneMap.rightToe, targets.rightFoot, targets.rightToe, 0.4)
           }
-          if (rig.boneMap.hips) {
-            const restHips = rig.restPose?.hips?.position
-            rig.boneMap.hips.position.x = restHips?.x ?? 0
-            rig.boneMap.hips.position.y = restHips?.y ?? rig.boneMap.hips.position.y
-            rig.boneMap.hips.position.z = restHips?.z ?? 0
-          }
-          applyBoneDirectionWeighted(rig.boneMap.spine, targets.hip, targets.spineMid || targets.chest, 0.34)
-          applyBoneDirectionWeighted(rig.boneMap.spineMid, targets.spineMid || targets.hip, targets.chest, 0.36)
-          applyBoneDirectionWeighted(rig.boneMap.chest, targets.chest, targets.neck || targets.head, 0.34)
-          applyBoneDirectionWeighted(rig.boneMap.neck, targets.neck || targets.chest, targets.head, 0.3)
-          applyBoneDirectionWeighted(rig.boneMap.head, targets.head, targets.headTop || targets.head, 0.24)
-          applyBoneDirectionWeighted(rig.boneMap.leftShoulder, targets.leftShoulder, targets.leftElbow, 0.22)
-          applyBoneDirectionWeighted(rig.boneMap.rightShoulder, targets.rightShoulder, targets.rightElbow, 0.22)
-          applyBoneDirectionWeighted(rig.boneMap.leftUpperArm, targets.leftShoulder, targets.leftElbow, 0.68)
-          applyBoneDirectionWeighted(rig.boneMap.leftLowerArm, targets.leftElbow, targets.leftWrist, 0.72)
-          applyBoneDirectionWeighted(rig.boneMap.leftHand, targets.leftWrist, targets.leftHand, 0.56)
-          applyBoneDirectionWeighted(rig.boneMap.rightUpperArm, targets.rightShoulder, targets.rightElbow, 0.68)
-          applyBoneDirectionWeighted(rig.boneMap.rightLowerArm, targets.rightElbow, targets.rightWrist, 0.72)
-          applyBoneDirectionWeighted(rig.boneMap.rightHand, targets.rightWrist, targets.rightHand, 0.56)
-          applyBoneDirectionWeighted(rig.boneMap.leftUpperLeg, targets.leftHip, targets.leftKnee, 0.62)
-          applyBoneDirectionWeighted(rig.boneMap.leftLowerLeg, targets.leftKnee, targets.leftAnkle, 0.68)
-          applyBoneDirectionWeighted(rig.boneMap.leftFoot, targets.leftAnkle, targets.leftFoot, 0.44)
-          applyBoneDirectionWeighted(rig.boneMap.leftToe, targets.leftFoot, targets.leftToe, 0.4)
-          applyBoneDirectionWeighted(rig.boneMap.rightUpperLeg, targets.rightHip, targets.rightKnee, 0.62)
-          applyBoneDirectionWeighted(rig.boneMap.rightLowerLeg, targets.rightKnee, targets.rightAnkle, 0.68)
-          applyBoneDirectionWeighted(rig.boneMap.rightFoot, targets.rightAnkle, targets.rightFoot, 0.44)
-          applyBoneDirectionWeighted(rig.boneMap.rightToe, targets.rightFoot, targets.rightToe, 0.4)
           rig.lastMoveDir = moveDir.lengthSq() > 1e-6 ? moveDir.clone().normalize() : rig.lastMoveDir
 
           if (rig.label) {

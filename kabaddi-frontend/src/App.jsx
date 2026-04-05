@@ -183,9 +183,11 @@ function OverlayMjpegPlayer({
 }) {
   const wrapRef = useRef(null)
   const baseImgRef = useRef(null)
+  const replayAudioRef = useRef(null)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [show3D, setShow3D] = useState(false)
   const [overlayFrameIndex, setOverlayFrameIndex] = useState(0)
+  const [isReplayAudioMuted, setIsReplayAudioMuted] = useState(true)
 
   const archiveMatWindow =
     Array.isArray(replay3d?.matWindow) && replay3d.matWindow.length > 0
@@ -208,23 +210,42 @@ function OverlayMjpegPlayer({
     ? archiveMatWindow[Math.max(0, Math.min(archiveMatWindow.length - 1, overlayFrameIndex))]
     : null
 
+  const can3D =
+    !!replay3d &&
+    Array.isArray(replay3d.matWindow) &&
+    replay3d.matWindow.length > 0
+
+  const canPoseOverlay =
+    !!replay3d &&
+    Array.isArray(replay3d.poseWindow) &&
+    replay3d.poseWindow.length > 0
+
   useEffect(() => {
     // 3D view is expanded-view only.
     if (!isFullscreen) setShow3D(false)
   }, [isFullscreen])
 
   useEffect(() => {
-    if (typeof document === 'undefined') return undefined
-    const onFullscreenChange = () => {
-      const active = document.fullscreenElement === wrapRef.current
-      setIsFullscreen(active)
-      if (!active) setShow3D(false)
+    const audio = replayAudioRef.current
+    if (!audio) return undefined
+
+    audio.muted = isReplayAudioMuted
+
+    if (!show3D || !can3D) {
+      audio.pause()
+      audio.currentTime = 0
+      return undefined
     }
-    document.addEventListener('fullscreenchange', onFullscreenChange)
+
+    const playPromise = audio.play()
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {})
+    }
+
     return () => {
-      document.removeEventListener('fullscreenchange', onFullscreenChange)
+      audio.pause()
     }
-  }, [])
+  }, [show3D, can3D, isReplayAudioMuted])
 
   useEffect(() => {
     if (!isFullscreen || typeof document === 'undefined') return undefined
@@ -250,40 +271,13 @@ function OverlayMjpegPlayer({
 
   const onFullscreen = async () => {
     if (!allowFullscreen) return
-    const el = wrapRef.current
-    if (!el?.requestFullscreen) {
-      setIsFullscreen(true)
-      return
-    }
-    try {
-      await el.requestFullscreen()
-      setIsFullscreen(true)
-    } catch {
-      setIsFullscreen(true)
-    }
+    setIsFullscreen(true)
   }
 
   const onCloseFullscreen = async () => {
-    try {
-      if (typeof document !== 'undefined' && document.fullscreenElement === wrapRef.current) {
-        await document.exitFullscreen()
-      }
-    } catch {
-      // ignore
-    }
     setIsFullscreen(false)
     setShow3D(false)
   }
-
-  const can3D =
-    !!replay3d &&
-    Array.isArray(replay3d.matWindow) &&
-    replay3d.matWindow.length > 0
-
-  const canPoseOverlay =
-    !!replay3d &&
-    Array.isArray(replay3d.poseWindow) &&
-    replay3d.poseWindow.length > 0
 
   if (!baseSrc) {
     return (
@@ -310,7 +304,7 @@ function OverlayMjpegPlayer({
         ) : null}
       </div>
 
-      {isFullscreen && typeof document !== 'undefined' && document.fullscreenElement !== wrapRef.current ? (
+      {isFullscreen ? (
         <div
           className="fixed inset-0 z-[120] bg-black/55 backdrop-blur-sm"
           onMouseDown={(e) => {
@@ -323,13 +317,30 @@ function OverlayMjpegPlayer({
         ref={wrapRef}
         className={`overflow-hidden border border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950/40 ${
           isFullscreen
-            ? 'fixed inset-0 z-[130] rounded-none border-0 shadow-none'
+            ? 'fixed inset-4 z-[130] rounded-2xl shadow-2xl'
             : 'relative rounded-xl'
         }`}
-        style={isFullscreen ? { width: '100vw', height: '100vh' } : { height }}
+        style={isFullscreen ? undefined : { height }}
       >
         {allowFullscreen && isFullscreen ? (
           <div className="absolute right-2 top-2 z-[120] flex items-center gap-2">
+            {can3D ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsReplayAudioMuted((prev) => !prev)}
+                  className={`rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm backdrop-blur transition ${
+                    show3D
+                      ? 'border-white/15 bg-black/45 text-white hover:bg-black/60'
+                      : 'border-stone-300/70 bg-white/90 text-stone-700 hover:bg-white dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/60'
+                  }`}
+                  aria-pressed={!isReplayAudioMuted}
+                  title={isReplayAudioMuted ? 'Unmute background audio' : 'Mute background audio'}
+                >
+                  {isReplayAudioMuted ? 'Muted' : 'Sound On'}
+                </button>
+              </>
+            ) : null}
             {can3D ? (
               <button
                 type="button"
@@ -421,16 +432,25 @@ function OverlayMjpegPlayer({
             style={{ pointerEvents: show3D ? 'auto' : 'none' }}
           >
             {show3D ? (
-              <RaidReplay3D
-                matWindow={replay3d.matWindow}
-                poseWindow={replay3d.poseWindow}
-                poseMeta={replay3d.poseMeta}
-                event={replay3d.event}
-                courtMeta={replay3d.courtMeta}
-                videoSrc={baseSrc}
-                videoFileSrc={replay3d.videoFileSrc}
-                theme={theme}
-              />
+              <>
+                <audio
+                  ref={replayAudioRef}
+                  src="/sound.mp3"
+                  loop
+                  muted={isReplayAudioMuted}
+                  preload="auto"
+                />
+                <RaidReplay3D
+                  matWindow={replay3d.matWindow}
+                  poseWindow={replay3d.poseWindow}
+                  poseMeta={replay3d.poseMeta}
+                  event={replay3d.event}
+                  courtMeta={replay3d.courtMeta}
+                  videoSrc={baseSrc}
+                  videoFileSrc={replay3d.videoFileSrc}
+                  theme={theme}
+                />
+              </>
             ) : null}
           </div>
         ) : null}

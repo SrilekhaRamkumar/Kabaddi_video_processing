@@ -3,6 +3,7 @@ import './App.css'
 import Graph2D from './Graph2D.jsx'
 import CourtMat2D from './CourtMat2D.jsx'
 import RaidReplay3D from './RaidReplay3D.jsx'
+import ArchitecturePage from './ArchitecturePage.jsx'
 
 const LS_BACKEND_HTTP = 'kabaddi.backendHttp'
 const LS_THEME = 'kabaddi.theme'
@@ -325,23 +326,6 @@ function OverlayMjpegPlayer({
         {allowFullscreen && isFullscreen ? (
           <div className="absolute right-2 top-2 z-[120] flex items-center gap-2">
             {can3D ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setIsReplayAudioMuted((prev) => !prev)}
-                  className={`rounded-full border px-3 py-2 text-[11px] font-semibold shadow-sm backdrop-blur transition ${
-                    show3D
-                      ? 'border-white/15 bg-black/45 text-white hover:bg-black/60'
-                      : 'border-stone-300/70 bg-white/90 text-stone-700 hover:bg-white dark:border-white/10 dark:bg-black/45 dark:text-white dark:hover:bg-black/60'
-                  }`}
-                  aria-pressed={!isReplayAudioMuted}
-                  title={isReplayAudioMuted ? 'Unmute background audio' : 'Mute background audio'}
-                >
-                  {isReplayAudioMuted ? 'Muted' : 'Sound On'}
-                </button>
-              </>
-            ) : null}
-            {can3D ? (
               <button
                 type="button"
                 onClick={() => setShow3D((v) => !v)}
@@ -435,7 +419,7 @@ function OverlayMjpegPlayer({
               <>
                 <audio
                   ref={replayAudioRef}
-                  src="/sound.mp3"
+                  src="/soundpm.mp3"
                   loop
                   muted={isReplayAudioMuted}
                   preload="auto"
@@ -1214,6 +1198,7 @@ function ScoreStrip({
 }
 
 function App() {
+  const [currentPage, setCurrentPage] = useState('dashboard')
   const initialTheme = useMemo(() => {
     const saved = localStorage.getItem(LS_THEME)
     return saved === 'dark' ? 'dark' : 'light'
@@ -1239,6 +1224,7 @@ function App() {
 
   const [conn, setConn] = useState({ mode: 'idle', lastAt: null, error: null })
   const [live, setLive] = useState(null)
+  const [pipelineStep, setPipelineStep] = useState(null)
   const [archiveReview, setArchiveReview] = useState(null)
   const [health, setHealth] = useState({
     ok: false,
@@ -1260,6 +1246,7 @@ function App() {
 
   const showDashboard = health.ok || !!offlineOutputs
   const showLive = health.ok && health.live
+  const isArchitecturePage = currentPage === 'architecture'
 
   const eventMapRef = useRef(new Map())
   const [events, setEvents] = useState([])
@@ -1326,6 +1313,7 @@ function App() {
     return {
       health: `${baseUrl}/api/health`,
       stateStream: `${baseUrl}/api/state/stream`,
+      pipelineStream: `${baseUrl}/api/pipeline/stream`,
       state: `${baseUrl}/api/state`,
       inputStream: `${baseUrl}/api/input/stream`,
       processingStream: `${baseUrl}/api/vis/stream`,
@@ -1466,6 +1454,47 @@ function App() {
         // ignore
       }
       if (pollTimer) clearInterval(pollTimer)
+    }
+  }, [endpoints, showLive])
+
+  useEffect(() => {
+    if (!endpoints || !showLive) {
+      setPipelineStep(null)
+      return
+    }
+
+    let closed = false
+    let es = null
+
+    try {
+      es = new EventSource(endpoints.pipelineStream)
+      es.onmessage = (msg) => {
+        if (closed) return
+        try {
+          const payload = JSON.parse(msg.data)
+          setPipelineStep(payload)
+        } catch {
+          // Ignore malformed messages.
+        }
+      }
+      es.onerror = () => {
+        try {
+          es?.close()
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      setPipelineStep(null)
+    }
+
+    return () => {
+      closed = true
+      try {
+        es?.close()
+      } catch {
+        // ignore
+      }
     }
   }, [endpoints, showLive])
 
@@ -1642,8 +1671,8 @@ function App() {
   }, [health.ok, scoreboard.attacker, scoreboard.defender])
 
   useEffect(() => {
-    if (!showDashboard) setSelectedEventId(null)
-  }, [showDashboard])
+    if (!showDashboard || isArchitecturePage) setSelectedEventId(null)
+  }, [showDashboard, isArchitecturePage])
 
   useEffect(() => {
     // If we transition from offline -> online, don't keep showing cached outputs.
@@ -1695,17 +1724,28 @@ function App() {
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="truncate text-2xl font-bold tracking-tight sm:text-3xl">
-                Kabaddi Live Dashboard
+                {isArchitecturePage ? 'Kabaddi System Architecture' : 'Kabaddi Live Dashboard'}
               </h1>
-              {connBadge}
+              {!isArchitecturePage ? connBadge : null}
             </div>
             <p className="mt-1 text-xs text-stone-600 dark:text-stone-400">
-              Input, tracking, mat, interaction graph, events, and classifier
-              validation.
+              {isArchitecturePage
+                ? 'A visual map of the project workflow from raw raid video to validated outputs.'
+                : 'Input, tracking, mat, interaction graph, events, and classifier validation.'}
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
+              onClick={() =>
+                setCurrentPage((page) =>
+                  page === 'dashboard' ? 'architecture' : 'dashboard',
+                )
+              }
+            >
+              {isArchitecturePage ? 'Open Dashboard' : 'Open Architecture'}
+            </button>
             <button
               className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
               onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
@@ -1713,7 +1753,7 @@ function App() {
               {theme === 'dark' ? 'Dark' : 'Light'}
             </button>
 
-            {showDashboard ? (
+            {showDashboard && !isArchitecturePage ? (
               <>
                 <div className="rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs dark:border-stone-800 dark:bg-stone-900/60">
                   <span className="text-stone-500 dark:text-stone-400">
@@ -1741,35 +1781,39 @@ function App() {
           </div>
         </div>
 
-        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="flex-1">
-            <label className="block text-[11px] font-medium text-stone-600 dark:text-stone-400">
-              Backend base URL (FastAPI)
-            </label>
-            <div className="mt-1 flex gap-2">
-              <input
-                value={backendHttpDraft}
-                onChange={(e) => setBackendHttpDraft(e.target.value)}
-                placeholder="http://localhost:8000"
-                className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-stone-400 dark:border-stone-800 dark:bg-stone-950/40 dark:focus:border-stone-600"
-              />
-              <button
-                className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
-                onClick={() => setBackendHttp(normalizeBaseUrl(backendHttpDraft))}
-              >
-                Connect
-              </button>
+        {!isArchitecturePage ? (
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex-1">
+              <label className="block text-[11px] font-medium text-stone-600 dark:text-stone-400">
+                Backend base URL (FastAPI)
+              </label>
+              <div className="mt-1 flex gap-2">
+                <input
+                  value={backendHttpDraft}
+                  onChange={(e) => setBackendHttpDraft(e.target.value)}
+                  placeholder="http://localhost:8000"
+                  className="w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-stone-400 dark:border-stone-800 dark:bg-stone-950/40 dark:focus:border-stone-600"
+                />
+                <button
+                  className="rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm font-medium shadow-sm hover:bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60 dark:hover:bg-stone-900"
+                  onClick={() => setBackendHttp(normalizeBaseUrl(backendHttpDraft))}
+                >
+                  Connect
+                </button>
+              </div>
             </div>
+            {conn.error ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-100">
+                {conn.error}
+              </div>
+            ) : null}
           </div>
-          {conn.error ? (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-100">
-              {conn.error}
-            </div>
-          ) : null}
-        </div>
+        ) : null}
       </header>
 
-      {!health.ok && offlineOutputs ? (
+      {isArchitecturePage ? (
+        <ArchitecturePage pipelineStep={pipelineStep} showLive={showLive} />
+      ) : !health.ok && offlineOutputs ? (
         <main className="w-full px-3 pb-10 sm:px-4 lg:px-5">
           <Panel title="Last Known Outputs" right={<Badge tone="slate">OFFLINE</Badge>} density="compact">
             <div className="text-xs text-stone-600 dark:text-stone-400">
@@ -2088,7 +2132,7 @@ function App() {
       </main>
       ) : null}
 
-      {showDashboard && selectedEventId ? (
+      {showDashboard && !isArchitecturePage && selectedEventId ? (
         <div
           className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4 backdrop-blur-sm"
           onMouseDown={(e) => {

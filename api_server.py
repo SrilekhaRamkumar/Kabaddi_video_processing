@@ -274,6 +274,21 @@ async def stream_state():
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+@app.get("/api/pipeline/stream")
+async def stream_pipeline():
+    q = _require_queue("pipeline_queue")
+
+    async def gen():
+        while True:
+            latest = _drain_latest(q)
+            if latest is not None:
+                payload = json.dumps(latest, ensure_ascii=False, separators=(",", ":"))
+                yield f"data: {payload}\n\n"
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @app.get("/api/logs/stream")
 async def stream_logs():
     """

@@ -1,17 +1,13 @@
 import json
 from pathlib import Path
-
 import cv2
 import numpy as np
 import torch
-
 from touch_classifier_model import TouchWindowClassifier
-
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 CLASS_NAMES = ["no_touch", "valid_touch"]
-
 
 class TouchClassifierInference:
     def __init__(self, checkpoint_path):

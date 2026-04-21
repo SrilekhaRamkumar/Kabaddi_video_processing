@@ -280,6 +280,7 @@ LIVE_FRAME_QUEUE = queue.Queue(maxsize=5)
 LIVE_STATE_QUEUE = queue.Queue(maxsize=5)
 LIVE_INPUT_QUEUE = queue.Queue(maxsize=5)
 LIVE_LOG_QUEUE = queue.Queue(maxsize=300)
+LIVE_PIPELINE_QUEUE = queue.Queue(maxsize=64)
 _API_THREAD = None
 _USER_QUIT = False
 _USER_RESTART = False
@@ -303,6 +304,28 @@ def _log_enqueue(line: str, stream: str = "stdout"):
             pass
     try:
         LIVE_LOG_QUEUE.put_nowait(payload)
+    except queue.Full:
+        pass
+
+
+def _emit_pipeline_step(step_key, stage_id, module_name, frame_idx=None, detail=None):
+    payload = {
+        "t": time.time(),
+        "step_key": str(step_key),
+        "stage_id": str(stage_id),
+        "module_name": str(module_name),
+        "frame_idx": int(frame_idx) if frame_idx is not None else None,
+    }
+    if detail is not None:
+        payload["detail"] = str(detail)
+
+    if LIVE_PIPELINE_QUEUE.full():
+        try:
+            LIVE_PIPELINE_QUEUE.get_nowait()
+        except queue.Empty:
+            pass
+    try:
+        LIVE_PIPELINE_QUEUE.put_nowait(payload)
     except queue.Full:
         pass
 
@@ -354,6 +377,7 @@ def start_api_server():
     api_server.app.state.state_queue = LIVE_STATE_QUEUE
     api_server.app.state.input_queue = LIVE_INPUT_QUEUE
     api_server.app.state.log_queue = LIVE_LOG_QUEUE
+    api_server.app.state.pipeline_queue = LIVE_PIPELINE_QUEUE
     api_server.app.state.run_id = SEQUENCE_RUN_ID
     api_server.app.state.video_stem = CURRENT_VIDEO_STEM
     uvicorn.run(api_server.app, host="0.0.0.0", port=8000, log_level="error")
@@ -376,6 +400,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 if device == "cpu":
     MODEL1="models/yolov8n.pt"
 print("Device used: ",device)
+_emit_pipeline_step("yolov8_entry", "01", "YOLOv8 Entry")
 model = YOLO(MODEL1).to(device)
 # model = RTDETR("rtdetr-l.pt").to(device)
 
@@ -388,7 +413,10 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
     raid_label = f"raid{int(raid_index)}"
     attacking_team = "A" if int(raid_index) % 2 == 1 else "B"
     defending_team = "B" if attacking_team == "A" else "A"
+    _emit_pipeline_step("video_input_configuration", "01", "Video Input + Configuration")
+    _emit_pipeline_step("input_layer", "01", "Input Layer")
     ACTIVE_CAMERA, H, mat_base, court_to_pixel, COURT_META = build_raid_geometry(VIDEO_PATH)
+    _emit_pipeline_step("homography_estimation", "02", "Homography Estimation")
 
     try:
         import api_server as _api_server
@@ -401,6 +429,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
     print(f"[RAID] Starting {raid_label} | Video: {os.path.basename(VIDEO_PATH)} | Attack: Team {attacking_team}")
     print(f"[RAID] Cumulative score entering raid: Team A {team_scores.get('A', 0)} - Team B {team_scores.get('B', 0)}")
 
+    _emit_pipeline_step("video_processing", "01", "Video Processing", frame_idx=0)
     vs = VideoStream(VIDEO_PATH).start()  # video_stream.VideoStream.start
     prev_gray = None
     NEXT_ID = 0
@@ -711,6 +740,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
             frame = vs.read()
             if frame is None: continue
             frame_idx += 1
+            _emit_pipeline_step("video_processing", "01", "Video Processing", frame_idx=frame_idx)
     
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         vis = frame.copy()
@@ -734,12 +764,16 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
 
         # 1. OPTICAL FLOW MOTION COMPENSATION
         if prev_gray is not None:
+            _emit_pipeline_step("kalman_predict_correct", "02", "Kalman Predict / Correct", frame_idx=frame_idx)
             apply_optical_flow(prev_gray, gray, GALLERY)  # tracking_pipeline.apply_optical_flow
 
         # 2. YOLO DETECTION
+        _emit_pipeline_step("yolov8_person_detection", "02", "YOLOv8 Person Detection", frame_idx=frame_idx)
         detections = run_yolo_detection(model, frame, device, CONF_THRESH)  # tracking_pipeline.run_yolo_detection
 
         # 3. TRACK PREDICTION & MATCHING
+        _emit_pipeline_step("hungarian_track_matching", "02", "Hungarian Track Matching", frame_idx=frame_idx)
+        _emit_pipeline_step("color_embed", "02", "Color Embed", frame_idx=frame_idx)
         matched_tracks, matched_dets = update_tracks(  # tracking_pipeline.update_tracks
             GALLERY,
             detections,
@@ -751,9 +785,12 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         )
 
         # 4. NEW TRACKS & AGING
+        _emit_pipeline_step("trackers_spawning", "02", "Trackers Spawning", frame_idx=frame_idx)
         NEXT_ID = add_new_tracks(GALLERY, detections, matched_dets, NEXT_ID, MAX_PLAYERS)  # tracking_pipeline.add_new_tracks
 
         # 5. MAT RENDERING & DIRECTION ARROWS
+        _emit_pipeline_step("track_gallery", "02", "Track Gallery", frame_idx=frame_idx)
+        _emit_pipeline_step("perspective_projection_player_position_map", "02", "Perspective Projection + Player Position Map", frame_idx=frame_idx)
         render_gallery(GALLERY, matched_tracks, vis, mat, H, court_to_pixel, LINE_MARGIN, SMOOTH_ALPHA, RAIDER_ID, MAX_AGE)  # tracking_pipeline.render_gallery
 
         # Cache per-frame court coords so confirmed events can later include the exact
@@ -794,6 +831,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         # ======================================================
 
         if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx < ASSIGN_FRAME:
+            _emit_pipeline_step("raider_stats_collection", "03", "Raider Stats Collection", frame_idx=frame_idx)
             collect_raider_stats(GALLERY, RAIDER_STATS, frame_idx, BAULK_Y)  # raider_logic.collect_raider_stats
 
 
@@ -804,6 +842,8 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         # ======================================================
 
         if not RAID_ASSIGNMENT_DONE and not RAIDER_EXITED and frame_idx >= ASSIGN_FRAME:
+            _emit_pipeline_step("multi_cue_raider_scoring", "03", "Multi Cue Raider Scoring", frame_idx=frame_idx)
+            _emit_pipeline_step("raider_id_assignment", "03", "Raider ID Assignment", frame_idx=frame_idx)
             best_id, raid_done, ASSIGN_FRAME = assign_raider(  # raider_logic.assign_raider
                 GALLERY,
                 RAIDER_STATS,
@@ -822,9 +862,11 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         # MODULE-2: INTERACTION LOGIC & PROPOSAL LAYER
         # ======================================================
    
-    
+     
+        _emit_pipeline_step("raider_id_player_stats", "03", "Raider ID + Player Stats", frame_idx=frame_idx)
         player_states, active_players = build_player_states(GALLERY)  # interaction_logic.build_player_states
         effective_raid_assignment = RAID_ASSIGNMENT_DONE and not RAIDER_EXITED
+        _emit_pipeline_step("interaction_proposal_engine", "03", "Interaction Proposal Engine", frame_idx=frame_idx)
         interaction_candidates, touch_confirmed = process_interactions(  # interaction_logic.process_interactions
             frame_idx,
             GALLERY,
@@ -869,16 +911,21 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         # --- DEBUG BLOCK: Print EVERYTHING in the Gallery ---
         # --- DETAILED DEBUG: Every Parameter + First 5 Color Values ---
      
-    
+
         
         frame_proposals = proposal_engine.finalize_frame_proposals()  # interaction_graph.InteractionProposalEngine.finalize_frame_proposals
         scene_graph = None
         if effective_raid_assignment and proposal_engine.candidate_proposals:
+            _emit_pipeline_step("afgn_graph_construction", "03", "AFGN Graph Construction", frame_idx=frame_idx)
             scene_graph = graph_engine.build_graph(  # interaction_graph.ActiveFactorGraphNetwork.build_graph
                 proposal_engine.candidate_proposals,
                 GALLERY,
                 RAIDER_ID
             )
+        _emit_pipeline_step("scene_graph_proposals", "03", "Scene Graph + Proposals", frame_idx=frame_idx)
+        _emit_pipeline_step("multi_frame_accumulation", "04", "Multi Frame Accumulation", frame_idx=frame_idx)
+        _emit_pipeline_step("factor_confidence_fusion", "04", "Factor Confidence Fusion", frame_idx=frame_idx)
+        _emit_pipeline_step("fused_confidence_threshold", "04", "Fused Confidence Threshold", frame_idx=frame_idx)
         confirmed_events = candidate_manager.update(  # temporal_events.TemporalInteractionCandidateManager.update
             frame_idx,
             frame_proposals,
@@ -886,6 +933,7 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
             RAIDER_ID,
             scene_graph,
         )
+        _emit_pipeline_step("confirmed_events", "04", "Confirmed Events", frame_idx=frame_idx)
         for confirmed_event in confirmed_events:
             try:
                 confirmed_event['raid_label'] = raid_label
@@ -1242,6 +1290,8 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                 for e in CONFIRMED_EVENT_LOG[-5:]  # Send latest 5 events
             ]
         }
+        _emit_pipeline_step("score_card", "07", "Score Card", frame_idx=frame_idx)
+        _emit_pipeline_step("event_logs", "07", "Event Logs", frame_idx=frame_idx)
 
         # Compact graph payload for frontend rendering (nodes + edges).
         # This avoids shipping a pre-rendered image and lets React render a 3D graph.
@@ -1331,8 +1381,10 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
         # -----------------------------------
 
         report_builder.add_frame(frame_idx, combined_frame)  # report_video.ConfirmedInteractionReportBuilder.add_frame
+        _emit_pipeline_step("visualization", "07", "Visualization", frame_idx=frame_idx)
         report_builder.capture_events(confirmed_events)  # report_video.ConfirmedInteractionReportBuilder.capture_events
         if report_builder.has_classifier_inputs():
+            _emit_pipeline_step("frame_buffer_alignment", "05", "Frame Buffer Alignment", frame_idx=frame_idx)
             classifier_inputs = report_builder.consume_classifier_inputs()  # report_video.ConfirmedInteractionReportBuilder.consume_classifier_inputs
             for item in classifier_inputs:
                 try:
@@ -1345,8 +1397,15 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                     payload["court_meta"] = COURT_META
                 except Exception:
                     pass
+            _emit_pipeline_step("dataset_export", "04", "Dataset Export", frame_idx=frame_idx)
+            _emit_pipeline_step("clip_export_metadata_json", "04", "Clip Export + Metadata JSON", frame_idx=frame_idx)
             exported_windows = dataset_exporter.export_batch(classifier_inputs)  # dataset_exporter.ConfirmedWindowDatasetExporter.export_batch
+            _emit_pipeline_step("temporal_frame_sampling", "05", "Temporal Frame Sampling", frame_idx=frame_idx)
+            _emit_pipeline_step("resnet18_frame_encoder", "05", "ResNet18 Frame Encoder", frame_idx=frame_idx)
+            _emit_pipeline_step("temporal_average_pool", "05", "Temporal Average Pool", frame_idx=frame_idx)
+            _emit_pipeline_step("mlp_classification_head", "05", "MLP Classification Head", frame_idx=frame_idx)
             classifier_results = classifier_bridge.score_batch(classifier_inputs)  # classifier_bridge.ConfirmedWindowClassifierBridge.score_batch
+            _emit_pipeline_step("event_confirmation", "05", "Event Confirmation", frame_idx=frame_idx)
             apply_classifier_results(CONFIRMED_EVENT_LOG, classifier_results)
             for event in CONFIRMED_EVENT_LOG:
                 try:
@@ -1387,10 +1446,12 @@ def process_single_raid(video_path, raid_index, team_scores, raid_summaries):
                     continue
             if exported_windows:
                 print(f"[DATASET] Exported {len(exported_windows)} confirmed window(s) to Videos/classifier_dataset")
+            _emit_pipeline_step("event_report_clips", "07", "Event Report Clips", frame_idx=frame_idx)
 
-   
     
+     
         if out is not None:
+            _emit_pipeline_step("processed_video", "07", "Processed Video", frame_idx=frame_idx)
             out.write(combined_frame)
 
         if SHOW_BACKEND_WINDOWS:
@@ -1542,6 +1603,7 @@ try:
     _api_server.app.state.frame_queue = None
     _api_server.app.state.state_queue = None
     _api_server.app.state.input_queue = None
+    _api_server.app.state.pipeline_queue = None
 except Exception as _exc:
     print(f"[ARCHIVE] Could not detach live queues from API server: {_exc}")
 
